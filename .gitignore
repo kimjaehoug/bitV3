@@ -22,3 +22,13 @@ ENV/
 .DS_Store
 Thumbs.db
 
+# Data files (too large for GitHub)
+data/
+*.csv
+
+# Model files (too large for GitHub)
+models/*.h5
+
+# Results (generated files)
+results/
+
