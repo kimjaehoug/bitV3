@@ -25,40 +25,67 @@ class Predictor:
         self.preprocessor = preprocessor
         self.target_scaler = target_scaler
     
-    def predict(self, X: np.ndarray, previous_prices: Optional[np.ndarray] = None) -> np.ndarray:
+    def predict(self, X: np.ndarray, previous_prices: np.ndarray = None, target_index: int = 1) -> np.ndarray:
         """
-        예측 수행
+        예측 수행 (멀티타겟: 3분, 5분, 15분 변화율 예측)
         
         Args:
             X: 입력 데이터 (n_samples, window_size, n_features)
             previous_prices: 이전 가격 (변화율을 절대 가격으로 변환하기 위해 필요)
-                            None이면 y_original에서 추출
+            target_index: 사용할 타겟 인덱스 (0: 3분, 1: 5분, 2: 15분, 기본값: 1=5분)
         
         Returns:
-            예측값 (원본 스케일 - 절대 가격)
+            예측값 (원본 스케일 - 선택한 타겟 시점의 close 가격)
         """
-        # 예측 (변화율)
+        # 예측 (스케일링된 변화율) - (n_samples, 3)
         y_pred_change_scaled = self.model.predict(X, verbose=0)
         
-        # 변화율로 역변환
-        y_pred_change = self.target_scaler.inverse_transform(y_pred_change_scaled.reshape(-1, 1)).flatten()
+        # 멀티타겟 역변환 (n_samples, 3)
+        y_pred_changes = self.target_scaler.inverse_transform(y_pred_change_scaled)
+        
+        # 선택한 타겟의 변화율 추출
+        y_pred_change = y_pred_changes[:, target_index]
+        
+        # 변화율 클리핑 (극단값 방지)
+        y_pred_change = np.clip(y_pred_change, -0.5, 0.5)
         
         # 변화율을 절대 가격으로 변환
         if previous_prices is not None:
-            # 이전 가격이 제공되면 그것을 사용
             y_pred = previous_prices * (1 + y_pred_change)
         else:
-            # 이전 가격이 없으면 에러 (main.py에서 제공해야 함)
             raise ValueError("변화율 예측을 절대 가격으로 변환하려면 previous_prices가 필요합니다.")
         
         return y_pred
     
-    def predict_single(self, sequence: np.ndarray) -> float:
+    def predict_multi(self, X: np.ndarray, previous_prices: np.ndarray = None) -> np.ndarray:
+        """
+        멀티타겟 예측 (3분, 5분, 15분 변화율 모두 반환)
+        
+        Args:
+            X: 입력 데이터 (n_samples, window_size, n_features)
+            previous_prices: 이전 가격
+        
+        Returns:
+            예측 변화율 (n_samples, 3) - [3분, 5분, 15분]
+        """
+        # 예측 (스케일링된 변화율) - (n_samples, 3)
+        y_pred_change_scaled = self.model.predict(X, verbose=0)
+        
+        # 멀티타겟 역변환 (n_samples, 3)
+        y_pred_changes = self.target_scaler.inverse_transform(y_pred_change_scaled)
+        
+        # 변화율 클리핑 (극단값 방지)
+        y_pred_changes = np.clip(y_pred_changes, -0.5, 0.5)
+        
+        return y_pred_changes
+    
+    def predict_single(self, sequence: np.ndarray, target_index: int = 1) -> float:
         """
         단일 시퀀스 예측
         
         Args:
             sequence: 단일 시퀀스 (window_size, n_features)
+            target_index: 사용할 타겟 인덱스 (0: 3분, 1: 5분, 2: 15분)
         
         Returns:
             예측값
@@ -66,7 +93,22 @@ class Predictor:
         if len(sequence.shape) == 2:
             sequence = sequence.reshape(1, *sequence.shape)
         
-        return self.predict(sequence)[0]
+        return self.predict(sequence, target_index=target_index)[0]
+    
+    def predict_single_multi(self, sequence: np.ndarray) -> np.ndarray:
+        """
+        단일 시퀀스 멀티타겟 예측
+        
+        Args:
+            sequence: 단일 시퀀스 (window_size, n_features)
+        
+        Returns:
+            예측 변화율 (3,) - [3분, 5분, 15분]
+        """
+        if len(sequence.shape) == 2:
+            sequence = sequence.reshape(1, *sequence.shape)
+        
+        return self.predict_multi(sequence)[0]
     
     def predict_batch(self, 
                      df: pd.DataFrame,

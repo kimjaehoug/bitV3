@@ -4,6 +4,8 @@
 """
 import pandas as pd
 import numpy as np
+import pickle
+import os
 from typing import Tuple, Optional
 from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler
 
@@ -44,7 +46,7 @@ class DataPreprocessor:
         self.is_fitted = False
     
     def _select_features(self, df: pd.DataFrame) -> list:
-        """사용할 특징 컬럼 자동 선택"""
+        """사용할 특징 컬럼 자동 선택 (데이터 누수 방지)"""
         if self.feature_columns:
             return self.feature_columns
         
@@ -53,7 +55,136 @@ class DataPreprocessor:
         if self.target_column in numeric_cols:
             numeric_cols.remove(self.target_column)
         
+        # 데이터 누수 방지: 가격 정보 제외 (open, high, low는 close와 매우 높은 상관관계)
+        # 시퀀스의 마지막 시점에서 이 값들을 사용하면 미래 정보를 사용하는 것과 같음
+        price_cols_to_exclude = ['open', 'high', 'low', 'close']
+        for col in price_cols_to_exclude:
+            if col in numeric_cols:
+                numeric_cols.remove(col)
+        
+        # 볼린저 밴드 특징 제외 (close 가격 기반이므로 매우 높은 상관관계)
+        bb_cols_to_exclude = ['bb_middle', 'bb_upper', 'bb_lower', 'bb_width', 'bb_position',
+                              'bb_middle_10', 'bb_upper_10', 'bb_lower_10', 'bb_width_10', 'bb_position_10']
+        for col in bb_cols_to_exclude:
+            if col in numeric_cols:
+                numeric_cols.remove(col)
+        
+        # 시간 기반 특징 제외 (hour_seasonality, dow_seasonality 등은 미래 정보 누수 가능)
+        time_based_cols = ['hour', 'day_of_week', 'day_of_month', 'month', 
+                          'hour_seasonality', 'dow_seasonality']
+        for col in time_based_cols:
+            if col in numeric_cols:
+                numeric_cols.remove(col)
+        
+        # volatility_regime 제외 (시간 기반 특징과 유사하게 다음 시점과 높은 일치)
+        if 'volatility_regime' in numeric_cols:
+            numeric_cols.remove('volatility_regime')
+        
+        # RSI 기반 방향성 특징 제외 (price_change 기반이므로 미래 정보 누수 가능)
+        # 이미 feature_engineering.py에서 생성되지 않으므로 제거 불필요
+        
         return numeric_cols
+    
+    def filter_features_by_correlation_consistency(self,
+                                                   X_train: np.ndarray,
+                                                   y_train: np.ndarray,
+                                                   X_val: np.ndarray,
+                                                   y_val: np.ndarray,
+                                                   feature_names: list,
+                                                   max_correlation_diff: float = 0.1) -> list:
+        """
+        Train과 Val에서 상관관계 차이가 작은 특징만 선택
+        
+        Args:
+            X_train: 학습 데이터 (n_samples, n_timesteps, n_features) 또는 (n_samples, n_features)
+            y_train: 학습 타겟 (n_samples,)
+            X_val: 검증 데이터 (n_samples, n_timesteps, n_features) 또는 (n_samples, n_features)
+            y_val: 검증 타겟 (n_samples,)
+            feature_names: 특징 이름 리스트
+            max_correlation_diff: 허용할 최대 상관관계 차이 (기본값: 0.1)
+        
+        Returns:
+            선택된 특징 이름 리스트
+        """
+        # 시퀀스의 마지막 시점만 사용
+        if len(X_train.shape) == 3:
+            X_train_last = X_train[:, -1, :]
+            X_val_last = X_val[:, -1, :]
+        else:
+            X_train_last = X_train
+            X_val_last = X_val
+        
+        selected_features = []
+        correlation_diffs = []
+        
+        for i, feat_name in enumerate(feature_names):
+            if i >= X_train_last.shape[1]:
+                continue
+            
+            train_feat = X_train_last[:, i]
+            val_feat = X_val_last[:, i]
+            
+            # Train 상관관계
+            train_corr = np.corrcoef(train_feat, y_train)[0, 1]
+            if np.isnan(train_corr):
+                train_corr = 0.0
+            
+            # Val 상관관계
+            val_corr = np.corrcoef(val_feat, y_val)[0, 1]
+            if np.isnan(val_corr):
+                val_corr = 0.0
+            
+            # 상관관계 차이
+            corr_diff = abs(train_corr - val_corr)
+            correlation_diffs.append({
+                'feature': feat_name,
+                'train_corr': train_corr,
+                'val_corr': val_corr,
+                'diff': corr_diff
+            })
+            
+            # 상관관계 차이가 작은 특징만 선택
+            if corr_diff <= max_correlation_diff:
+                selected_features.append(feat_name)
+        
+        # 선택된 특징(일관성 있는 특징) 출력
+        selected_features_info = [d for d in correlation_diffs if d['feature'] in selected_features]
+        if selected_features_info:
+            # Train과 Val 모두에서 절댓값 상관관계가 높은 순으로 정렬
+            selected_features_sorted = sorted(
+                selected_features_info,
+                key=lambda x: (abs(x['train_corr']) + abs(x['val_corr'])),  # 두 상관관계의 절댓값 합
+                reverse=True
+            )
+            print(f"\n✓ 일관성 있는 특징 (선택됨, {len(selected_features)}개):")
+            print("  [Train 상관관계 | Val 상관관계 | 차이]")
+            for feat_info in selected_features_sorted[:20]:  # 상위 20개 출력
+                avg_corr = (abs(feat_info['train_corr']) + abs(feat_info['val_corr'])) / 2
+                print(f"  {feat_info['feature']:30s}: "
+                      f"Train={feat_info['train_corr']:7.4f}, "
+                      f"Val={feat_info['val_corr']:7.4f}, "
+                      f"차이={feat_info['diff']:6.4f}, "
+                      f"평균절댓값={avg_corr:.4f}")
+            if len(selected_features_sorted) > 20:
+                print(f"  ... 외 {len(selected_features_sorted) - 20}개")
+        
+        # 제거된 특징 출력
+        removed_features = [d for d in correlation_diffs if d['feature'] not in selected_features]
+        if removed_features:
+            removed_features_sorted = sorted(removed_features, key=lambda x: x['diff'], reverse=True)
+            print(f"\n✗ 상관관계 차이로 인해 제거된 특징 ({len(removed_features)}개):")
+            print("  [Train 상관관계 | Val 상관관계 | 차이]")
+            for feat_info in removed_features_sorted[:15]:  # 상위 15개 출력
+                print(f"  {feat_info['feature']:30s}: "
+                      f"Train={feat_info['train_corr']:7.4f}, "
+                      f"Val={feat_info['val_corr']:7.4f}, "
+                      f"차이={feat_info['diff']:6.4f}")
+            if len(removed_features_sorted) > 15:
+                print(f"  ... 외 {len(removed_features_sorted) - 15}개")
+        
+        print(f"\n최종 선택: {len(selected_features)}개 / 전체 {len(feature_names)}개")
+        
+        return selected_features
     
     def _remove_future_leakage(self, df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -72,23 +203,40 @@ class DataPreprocessor:
                         data: np.ndarray, 
                         target: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """
-        슬라이딩 윈도우로 시퀀스 생성
+        슬라이딩 윈도우로 시퀀스 생성 (데이터 누수 방지)
+        멀티타겟 지원 (target이 2D 배열인 경우)
         
         Args:
             data: 특징 데이터 (n_samples, n_features)
-            target: 타겟 데이터 (n_samples,)
+            target: 타겟 데이터 (n_samples,) 또는 (n_samples, n_targets) - 멀티타겟
         
         Returns:
             X: 시퀀스 데이터 (n_sequences, window_size, n_features)
-            y: 타겟 데이터 (n_sequences,)
+            y: 타겟 데이터 (n_sequences,) 또는 (n_sequences, n_targets)
+        
+        Note:
+            시퀀스의 마지막 시점은 예측 시점 이전이어야 함 (데이터 누수 방지)
+            예: window_size=60, prediction_horizon=1이면
+            - 시퀀스 i: data[i:i+60] 사용 (인덱스 i~i+59)
+            - 타겟: target[i+60] (인덱스 i+60, 즉 시퀀스 마지막 시점의 다음)
         """
         X, y = [], []
         
+        # target이 1D인지 2D인지 확인
+        is_multitarget = target.ndim == 2
+        
         for i in range(len(data) - self.window_size - self.prediction_horizon + 1):
             # 과거 window_size만큼의 데이터를 입력으로 사용
+            # 마지막 시점은 예측 시점 이전이어야 함
             X.append(data[i:i + self.window_size])
             # prediction_horizon 이후의 타겟을 예측
-            y.append(target[i + self.window_size + self.prediction_horizon - 1])
+            # target[i + window_size + prediction_horizon - 1]은 
+            # 시퀀스의 마지막 시점(i + window_size - 1) 이후 prediction_horizon만큼 떨어진 시점
+            target_idx = i + self.window_size + self.prediction_horizon - 1
+            if is_multitarget:
+                y.append(target[target_idx])  # (n_targets,)
+            else:
+                y.append(target[target_idx])
         
         return np.array(X), np.array(y)
     
@@ -212,6 +360,43 @@ class DataPreprocessor:
         y_test = y[split_idx:]
         
         return X_train, X_test, y_train, y_test
+    
+    def save_scalers(self, filepath: str):
+        """스케일러 저장"""
+        # _last_feature_cols가 있으면 그것을 사용, 없으면 feature_columns 사용
+        feature_cols_to_save = self._last_feature_cols if hasattr(self, '_last_feature_cols') and self._last_feature_cols else self.feature_columns
+        scaler_data = {
+            'feature_scaler': self.scaler,
+            'target_scaler': self.target_scaler,
+            'feature_columns': feature_cols_to_save,  # 스케일러가 학습한 전체 feature 목록
+            'model_feature_columns': getattr(self, 'model_feature_columns', None),  # 모델이 실제로 사용한 feature 목록
+            'window_size': self.window_size,
+            'target_column': self.target_column,
+            'scaler_type': self.scaler_type,
+            'is_fitted': self.is_fitted
+        }
+        os.makedirs(os.path.dirname(filepath) if os.path.dirname(filepath) else '.', exist_ok=True)
+        with open(filepath, 'wb') as f:
+            pickle.dump(scaler_data, f)
+        print(f"스케일러 저장 완료: {filepath}")
+        if hasattr(self, 'model_feature_columns'):
+            print(f"모델 feature 목록 저장: {len(self.model_feature_columns)}개")
+    
+    def load_scalers(self, filepath: str):
+        """스케일러 로드"""
+        with open(filepath, 'rb') as f:
+            scaler_data = pickle.load(f)
+        self.scaler = scaler_data['feature_scaler']
+        self.target_scaler = scaler_data['target_scaler']
+        self.feature_columns = scaler_data.get('feature_columns')
+        self.model_feature_columns = scaler_data.get('model_feature_columns')  # 모델이 실제로 사용한 feature 목록
+        self.window_size = scaler_data.get('window_size', self.window_size)
+        self.target_column = scaler_data.get('target_column', self.target_column)
+        self.scaler_type = scaler_data.get('scaler_type', self.scaler_type)
+        self.is_fitted = scaler_data.get('is_fitted', True)
+        print(f"스케일러 로드 완료: {filepath}")
+        if self.model_feature_columns:
+            print(f"모델 feature 목록 로드: {len(self.model_feature_columns)}개")
 
 
 if __name__ == "__main__":

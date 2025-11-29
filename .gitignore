@@ -32,3 +32,8 @@ models/*.h5
 # Results (generated files)
 results/
 
+# Environment variables (API keys)
+.env
+.env.local
+.env.*.local
+

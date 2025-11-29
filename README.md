@@ -41,9 +41,49 @@ pip install -r requirements.txt
 
 ### 3. 실행
 
+#### 모델 학습
+
 ```bash
 python main.py
 ```
+
+#### 실시간 시그널 생성 (거래 없음)
+
+```bash
+python realtime_trading.py
+```
+
+#### 실시간 자동 거래 (실거래)
+
+**⚠️ 주의: 실제 자금이 사용됩니다!**
+
+1. 바이낸스 API 키 설정 (환경변수 또는 코드에서 직접 설정)
+
+```bash
+export BINANCE_API_KEY="your_api_key"
+export BINANCE_API_SECRET="your_api_secret"
+```
+
+2. 실거래 실행
+
+```bash
+python realtime_trading.py --trade
+```
+
+**거래 조건:**
+- 3분봉 변화율 >= 0.10%
+- 5분봉 변화율 >= 0.15%
+- 15분봉 변화율 >= 0.15%
+- 모두 같은 부호 (상승 예측일 때만 매수)
+- 조건 충족 시 100% 자금 사용, 30배 레버리지, 시장가 거래
+- Take Profit: ROI 7% 달성 시 포지션 자동 종료
+- 5분마다 예측 및 계좌 점검
+
+**옵션:**
+- `--trade`: 실거래 모드 활성화
+- `--leverage N`: 레버리지 배수 설정 (기본값: 30)
+- `--take-profit N`: Take Profit ROI 설정 (기본값: 0.07 = 7%)
+- `--interval N`: 실행 간격 (분, 기본값: 5)
 
 ## 모델 구조
 
