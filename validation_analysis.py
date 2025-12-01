@@ -33,13 +33,13 @@ class ValidationAnalysis:
             'distribution_differences': []
         }
         
-        # 멀티타겟인지 확인 (y_train이 2D이고 shape[1] == 3이면 멀티타겟)
-        is_multitarget = y_train.ndim == 2 and y_train.shape[1] == 3
+        # 멀티타겟인지 확인 (y_train이 2D이고 shape[1] == 2이면 멀티타겟)
+        is_multitarget = y_train.ndim == 2 and y_train.shape[1] == 2
         
         # 멀티타겟인 경우 5분 타겟(인덱스 1) 사용
         if is_multitarget:
-            y_train_target = y_train[:, 1]  # 5분 타겟
-            y_val_target = y_val[:, 1]  # 5분 타겟
+            y_train_target = y_train[:, 1]  # 1시간 타겟
+            y_val_target = y_val[:, 1]  # 1시간 타겟
         else:
             y_train_target = y_train.flatten() if y_train.ndim > 1 else y_train
             y_val_target = y_val.flatten() if y_val.ndim > 1 else y_val
@@ -117,13 +117,13 @@ class ValidationAnalysis:
             X_train_last = X_train
             X_val_last = X_val
         
-        # 멀티타겟인지 확인 (y_train이 2D이고 shape[1] == 3이면 멀티타겟)
-        is_multitarget = y_train.ndim == 2 and y_train.shape[1] == 3
+        # 멀티타겟인지 확인 (y_train이 2D이고 shape[1] == 2이면 멀티타겟)
+        is_multitarget = y_train.ndim == 2 and y_train.shape[1] == 2
         
         # 멀티타겟인 경우 5분 타겟(인덱스 1) 사용
         if is_multitarget:
-            y_train_target = y_train[:, 1]  # 5분 타겟
-            y_val_target = y_val[:, 1]  # 5분 타겟
+            y_train_target = y_train[:, 1]  # 1시간 타겟
+            y_val_target = y_val[:, 1]  # 1시간 타겟
         else:
             y_train_target = y_train.flatten() if y_train.ndim > 1 else y_train
             y_val_target = y_val.flatten() if y_val.ndim > 1 else y_val

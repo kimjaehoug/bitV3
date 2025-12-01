@@ -167,38 +167,39 @@ def main():
     target_data = target_series.values
     
     # 타겟: 5분 후의 close 가격 (prediction_horizon=1이므로 다음 5분봉)
-    # 멀티타겟: 3분, 5분, 15분 후 변화율 예측
-    print("타겟: 3분, 5분, 15분 후 변화율 (멀티타겟 예측)")
+    # 멀티타겟: 30분, 1시간 후 변화율 예측
+    print("타겟: 30분, 1시간 후 변화율 (멀티타겟 예측)")
     
     # 각 시점의 변화율 계산
-    # 3분 후 (3개 시점 후)
-    target_3m = np.roll(target_data, -3)
-    target_3m[-3:] = target_data[-3:]  # 마지막 3개는 자기 자신
-    change_3m = (target_3m - target_data) / (target_data + 1e-8)
+    # 30분 후 (6개 시점 후, 30분 / 5분 = 6)
+    # 직접 인덱싱 사용 (np.roll 대신)
+    change_30m = np.zeros_like(target_data)
+    for i in range(len(target_data) - 6):
+        change_30m[i] = (target_data[i + 6] - target_data[i]) / (target_data[i] + 1e-8)
+    # 마지막 6개는 0으로 설정 (예측 불가)
+    change_30m[-6:] = 0
     
-    # 5분 후 (5개 시점 후)
-    target_5m = np.roll(target_data, -5)
-    target_5m[-5:] = target_data[-5:]  # 마지막 5개는 자기 자신
-    change_5m = (target_5m - target_data) / (target_data + 1e-8)
-    
-    # 15분 후 (15개 시점 후)
-    target_15m = np.roll(target_data, -15)
-    target_15m[-15:] = target_data[-15:]  # 마지막 15개는 자기 자신
-    change_15m = (target_15m - target_data) / (target_data + 1e-8)
+    # 1시간 후 (12개 시점 후, 60분 / 5분 = 12)
+    change_1h = np.zeros_like(target_data)
+    for i in range(len(target_data) - 12):
+        change_1h[i] = (target_data[i + 12] - target_data[i]) / (target_data[i] + 1e-8)
+    # 마지막 12개는 0으로 설정 (예측 불가)
+    change_1h[-12:] = 0
     
     # 명백한 오류만 제거 (예: ±50% 이상 같은 데이터 오류)
     outlier_threshold = 0.5
-    change_3m = np.clip(change_3m, -outlier_threshold, outlier_threshold)
-    change_5m = np.clip(change_5m, -outlier_threshold, outlier_threshold)
-    change_15m = np.clip(change_15m, -outlier_threshold, outlier_threshold)
+    change_30m = np.clip(change_30m, -outlier_threshold, outlier_threshold)
+    change_1h = np.clip(change_1h, -outlier_threshold, outlier_threshold)
     
-    # 변화율 통계 출력
-    print(f"3분 변화율: min={change_3m.min():.6f}, max={change_3m.max():.6f}, mean={change_3m.mean():.6f}, std={change_3m.std():.6f}")
-    print(f"5분 변화율: min={change_5m.min():.6f}, max={change_5m.max():.6f}, mean={change_5m.mean():.6f}, std={change_5m.std():.6f}")
-    print(f"15분 변화율: min={change_15m.min():.6f}, max={change_15m.max():.6f}, mean={change_15m.mean():.6f}, std={change_15m.std():.6f}")
+    # 변화율 통계 출력 (스케일링 전)
+    print(f"\n=== 변화율 통계 (스케일링 전) ===")
+    print(f"30분 변화율: min={change_30m.min():.6f}, max={change_30m.max():.6f}, mean={change_30m.mean():.6f}, std={change_30m.std():.6f}")
+    print(f"1시간 변화율: min={change_1h.min():.6f}, max={change_1h.max():.6f}, mean={change_1h.mean():.6f}, std={change_1h.std():.6f}")
+    print(f"30분 변화율 절댓값 평균: {np.abs(change_30m).mean():.6f}")
+    print(f"1시간 변화율 절댓값 평균: {np.abs(change_1h).mean():.6f}")
     
-    # 멀티타겟 배열 생성 (n_samples, 3)
-    target_changes = np.column_stack([change_3m, change_5m, change_15m])
+    # 멀티타겟 배열 생성 (n_samples, 2)
+    target_changes = np.column_stack([change_30m, change_1h])
     
     # 시퀀스 생성 (멀티타겟)
     X_raw, y_raw = preprocessor.create_sequences(feature_data, target_changes)
@@ -207,9 +208,8 @@ def main():
     _, y_original = preprocessor.create_sequences(feature_data, target_data)
     
     print(f"생성된 시퀀스: {X_raw.shape}, 타겟(멀티타겟 변화율): {y_raw.shape}")
-    print(f"멀티타겟 범위: 3분=[{y_raw[:, 0].min():.4f}, {y_raw[:, 0].max():.4f}], "
-          f"5분=[{y_raw[:, 1].min():.4f}, {y_raw[:, 1].max():.4f}], "
-          f"15분=[{y_raw[:, 2].min():.4f}, {y_raw[:, 2].max():.4f}]")
+    print(f"멀티타겟 범위: 30분=[{y_raw[:, 0].min():.4f}, {y_raw[:, 0].max():.4f}], "
+          f"1시간=[{y_raw[:, 1].min():.4f}, {y_raw[:, 1].max():.4f}]")
     
     feature_names = actual_cols  # 실제 선택된 컬럼 사용
     print(f"시퀀스 데이터 shape: {X_raw.shape}")
@@ -270,11 +270,11 @@ def main():
     # 스케일러 학습 (필터링된 특징으로)
     preprocessor.scaler.fit(X_train_flat)
     
-    # 타겟 스케일링: 멀티타겟 (3분, 5분, 15분 변화율)
+    # 타겟 스케일링: 멀티타겟 (30분, 1시간 변화율)
     # MinMaxScaler로 [-1, 1] 범위로 정규화
     from sklearn.preprocessing import MinMaxScaler
     preprocessor.target_scaler = MinMaxScaler(feature_range=(-1, 1))
-    # y_train_raw는 (n_samples, 3) 형태
+    # y_train_raw는 (n_samples, 2) 형태
     preprocessor.target_scaler.fit(y_train_raw)
     
     preprocessor.is_fitted = True
@@ -294,7 +294,7 @@ def main():
     X_val = X_val_scaled_flat.reshape(X_val_raw.shape[0], n_timesteps, n_features)
     X_test = X_test_scaled_flat.reshape(X_test_raw.shape[0], n_timesteps, n_features)
     
-    # 멀티타겟 스케일링 (y_train_raw는 이미 (n_samples, 3) 형태)
+    # 멀티타겟 스케일링 (y_train_raw는 이미 (n_samples, 2) 형태)
     y_train = preprocessor.target_scaler.transform(y_train_raw)
     y_val = preprocessor.target_scaler.transform(y_val_raw)
     y_test = preprocessor.target_scaler.transform(y_test_raw)
@@ -341,14 +341,17 @@ def main():
     print(f"  y_val_orig 범위: [{y_val_orig.min():.2f}, {y_val_orig.max():.2f}], 평균: {y_val_orig.mean():.2f}, std: {y_val_orig.std():.2f}")
     
     # 스케일러 정보 확인
-    print(f"\n스케일러 정보:")
+    print(f"\n=== 타겟 스케일러 정보 (30분/1시간 변화율용) ===")
     if hasattr(preprocessor.target_scaler, 'mean_'):
         # StandardScaler인 경우
-        print(f"  Target Scaler mean: {preprocessor.target_scaler.mean_[0]:.4f}, scale: {preprocessor.target_scaler.scale_[0]:.4f}")
+        print(f"  30분 타겟 - mean: {preprocessor.target_scaler.mean_[0]:.4f}, scale: {preprocessor.target_scaler.scale_[0]:.4f}")
+        print(f"  1시간 타겟 - mean: {preprocessor.target_scaler.mean_[1]:.4f}, scale: {preprocessor.target_scaler.scale_[1]:.4f}")
     else:
-        # MinMaxScaler인 경우
-        print(f"  Target Scaler min: {preprocessor.target_scaler.min_[0]:.4f}, scale: {preprocessor.target_scaler.scale_[0]:.4f}")
-        print(f"  Target Scaler data range: [{preprocessor.target_scaler.data_min_[0]:.4f}, {preprocessor.target_scaler.data_max_[0]:.4f}]")
+        # MinMaxScaler인 경우 (feature_range=(-1, 1))
+        print(f"  30분 타겟 - 원본 데이터 범위: [{preprocessor.target_scaler.data_min_[0]:.6f}, {preprocessor.target_scaler.data_max_[0]:.6f}]")
+        print(f"  30분 타겟 - 스케일링 후 범위: [-1.0, 1.0]")
+        print(f"  1시간 타겟 - 원본 데이터 범위: [{preprocessor.target_scaler.data_min_[1]:.6f}, {preprocessor.target_scaler.data_max_[1]:.6f}]")
+        print(f"  1시간 타겟 - 스케일링 후 범위: [-1.0, 1.0]")
     
     # 사용된 특징 확인
     print(f"\n사용된 특징 개수: {len(feature_names)}개")
@@ -460,19 +463,63 @@ def main():
     if len(val_prev_prices) != len(X_val):
         val_prev_prices = val_prev_prices[:len(X_val)]
     
-    predictions_test = predictor.predict(X_test, previous_prices=test_prev_prices)
-    actuals_test = y_test_orig
+    # 멀티타겟 예측 (30분, 1시간 모두)
+    y_pred_changes_test = predictor.predict_multi(X_test)
+    y_pred_changes_val = predictor.predict_multi(X_val)
     
-    # 검증 데이터 예측
-    predictions_val = predictor.predict(X_val, previous_prices=val_prev_prices)
-    actuals_val = y_val_orig
+    # 실제 타겟값도 멀티타겟 형태로 변환 (변화율 → 절대 가격)
+    # y_test_orig, y_val_orig는 다음 5분봉 가격이므로, 30분/1시간 후 가격을 계산해야 함
+    # 실제 30분 후 가격 = target_data[test_start + 6], 1시간 후 = target_data[test_start + 12]
+    test_30m_indices = np.arange(test_start + 5, test_start + 5 + len(X_test))  # 6개 시점 후
+    test_1h_indices = np.arange(test_start + 11, test_start + 11 + len(X_test))  # 12개 시점 후
+    val_30m_indices = np.arange(val_start + 5, val_start + 5 + len(X_val))
+    val_1h_indices = np.arange(val_start + 11, val_start + 11 + len(X_val))
+    
+    # 인덱스 범위 확인
+    test_30m_indices = test_30m_indices[test_30m_indices < len(target_data)]
+    test_1h_indices = test_1h_indices[test_1h_indices < len(target_data)]
+    val_30m_indices = val_30m_indices[val_30m_indices < len(target_data)]
+    val_1h_indices = val_1h_indices[val_1h_indices < len(target_data)]
+    
+    # 실제 30분/1시간 후 가격
+    actuals_test_30m = target_data[test_30m_indices[:len(X_test)]]
+    actuals_test_1h = target_data[test_1h_indices[:len(X_test)]]
+    actuals_val_30m = target_data[val_30m_indices[:len(X_val)]]
+    actuals_val_1h = target_data[val_1h_indices[:len(X_val)]]
+    
+    # 예측 가격 계산 (변화율 → 절대 가격)
+    predictions_test_30m = test_prev_prices[:len(y_pred_changes_test)] * (1 + y_pred_changes_test[:, 0])
+    predictions_test_1h = test_prev_prices[:len(y_pred_changes_test)] * (1 + y_pred_changes_test[:, 1])
+    predictions_val_30m = val_prev_prices[:len(y_pred_changes_val)] * (1 + y_pred_changes_val[:, 0])
+    predictions_val_1h = val_prev_prices[:len(y_pred_changes_val)] * (1 + y_pred_changes_val[:, 1])
+    
+    # 길이 맞추기
+    min_len_test_30m = min(len(predictions_test_30m), len(actuals_test_30m))
+    min_len_test_1h = min(len(predictions_test_1h), len(actuals_test_1h))
+    min_len_val_30m = min(len(predictions_val_30m), len(actuals_val_30m))
+    min_len_val_1h = min(len(predictions_val_1h), len(actuals_val_1h))
+    
+    predictions_test_30m = predictions_test_30m[:min_len_test_30m]
+    actuals_test_30m = actuals_test_30m[:min_len_test_30m]
+    predictions_test_1h = predictions_test_1h[:min_len_test_1h]
+    actuals_test_1h = actuals_test_1h[:min_len_test_1h]
+    predictions_val_30m = predictions_val_30m[:min_len_val_30m]
+    actuals_val_30m = actuals_val_30m[:min_len_val_30m]
+    predictions_val_1h = predictions_val_1h[:min_len_val_1h]
+    actuals_val_1h = actuals_val_1h[:min_len_val_1h]
     
     # 예측값 통계 출력 (디버깅)
-    print(f"\n예측값 통계:")
-    print(f"  predictions_test 범위: [{predictions_test.min():.2f}, {predictions_test.max():.2f}], 평균: {predictions_test.mean():.2f}, std: {predictions_test.std():.2f}")
-    print(f"  actuals_test 범위: [{actuals_test.min():.2f}, {actuals_test.max():.2f}], 평균: {actuals_test.mean():.2f}, std: {actuals_test.std():.2f}")
-    print(f"  predictions_val 범위: [{predictions_val.min():.2f}, {predictions_val.max():.2f}], 평균: {predictions_val.mean():.2f}, std: {predictions_val.std():.2f}")
-    print(f"  actuals_val 범위: [{actuals_val.min():.2f}, {actuals_val.max():.2f}], 평균: {actuals_val.mean():.2f}, std: {actuals_val.std():.2f}")
+    print(f"\n=== 30분 예측 통계 ===")
+    print(f"  Test - 예측 범위: [{predictions_test_30m.min():.2f}, {predictions_test_30m.max():.2f}], 평균: {predictions_test_30m.mean():.2f}")
+    print(f"  Test - 실제 범위: [{actuals_test_30m.min():.2f}, {actuals_test_30m.max():.2f}], 평균: {actuals_test_30m.mean():.2f}")
+    print(f"  Val - 예측 범위: [{predictions_val_30m.min():.2f}, {predictions_val_30m.max():.2f}], 평균: {predictions_val_30m.mean():.2f}")
+    print(f"  Val - 실제 범위: [{actuals_val_30m.min():.2f}, {actuals_val_30m.max():.2f}], 평균: {actuals_val_30m.mean():.2f}")
+    
+    print(f"\n=== 1시간 예측 통계 ===")
+    print(f"  Test - 예측 범위: [{predictions_test_1h.min():.2f}, {predictions_test_1h.max():.2f}], 평균: {predictions_test_1h.mean():.2f}")
+    print(f"  Test - 실제 범위: [{actuals_test_1h.min():.2f}, {actuals_test_1h.max():.2f}], 평균: {actuals_test_1h.mean():.2f}")
+    print(f"  Val - 예측 범위: [{predictions_val_1h.min():.2f}, {predictions_val_1h.max():.2f}], 평균: {predictions_val_1h.mean():.2f}")
+    print(f"  Val - 실제 범위: [{actuals_val_1h.min():.2f}, {actuals_val_1h.max():.2f}], 평균: {actuals_val_1h.mean():.2f}")
     
     # 7. 평가 및 결과 저장
     print("\n[7/8] 평가 및 결과 저장 중...")
@@ -484,36 +531,56 @@ def main():
     total_sequences = len(X_train) + len(X_val) + len(X_test)
     sequence_timestamps = df_features.index[start_idx:start_idx + total_sequences]
     
-    # 테스트 데이터 평가
-    print("\n--- 테스트 데이터 평가 ---")
+    # 30분 예측 평가
+    print("\n" + "="*60)
+    print("30분 예측 평가")
+    print("="*60)
+    
+    # 테스트 데이터 평가 (30분)
+    print("\n--- 테스트 데이터 평가 (30분) ---")
     test_start_idx = len(X_train) + len(X_val)
-    test_timestamps = sequence_timestamps[test_start_idx:test_start_idx + len(predictions_test)]
-    test_metrics = evaluator.evaluate_and_save(
-        predictions_test,
-        actuals_test,
-        test_timestamps,
-        prefix='test'
+    test_timestamps_30m = sequence_timestamps[test_start_idx:test_start_idx + len(predictions_test_30m)]
+    test_metrics_30m = evaluator.evaluate_and_save(
+        predictions_test_30m,
+        actuals_test_30m,
+        test_timestamps_30m,
+        prefix='test_30m'
     )
     
-    # 검증 데이터 평가
-    print("\n--- 검증 데이터 평가 ---")
-    print(f"검증 예측값 길이: {len(predictions_val)}")
-    print(f"검증 실제값 길이: {len(actuals_val)}")
-    
-    # 길이가 맞지 않으면 조정
-    min_len = min(len(predictions_val), len(actuals_val))
-    if len(predictions_val) != len(actuals_val):
-        print(f"경고: 길이가 다릅니다. {min_len}개로 맞춥니다.")
-        predictions_val = predictions_val[:min_len]
-        actuals_val = actuals_val[:min_len]
-    
+    # 검증 데이터 평가 (30분)
+    print("\n--- 검증 데이터 평가 (30분) ---")
     val_start_idx = len(X_train)
-    val_timestamps = sequence_timestamps[val_start_idx:val_start_idx + len(predictions_val)]
-    val_metrics = evaluator.evaluate_and_save(
-        predictions_val,
-        actuals_val,
-        val_timestamps,
-        prefix='validation'
+    val_timestamps_30m = sequence_timestamps[val_start_idx:val_start_idx + len(predictions_val_30m)]
+    val_metrics_30m = evaluator.evaluate_and_save(
+        predictions_val_30m,
+        actuals_val_30m,
+        val_timestamps_30m,
+        prefix='validation_30m'
+    )
+    
+    # 1시간 예측 평가
+    print("\n" + "="*60)
+    print("1시간 예측 평가")
+    print("="*60)
+    
+    # 테스트 데이터 평가 (1시간)
+    print("\n--- 테스트 데이터 평가 (1시간) ---")
+    test_timestamps_1h = sequence_timestamps[test_start_idx:test_start_idx + len(predictions_test_1h)]
+    test_metrics_1h = evaluator.evaluate_and_save(
+        predictions_test_1h,
+        actuals_test_1h,
+        test_timestamps_1h,
+        prefix='test_1h'
+    )
+    
+    # 검증 데이터 평가 (1시간)
+    print("\n--- 검증 데이터 평가 (1시간) ---")
+    val_timestamps_1h = sequence_timestamps[val_start_idx:val_start_idx + len(predictions_val_1h)]
+    val_metrics_1h = evaluator.evaluate_and_save(
+        predictions_val_1h,
+        actuals_val_1h,
+        val_timestamps_1h,
+        prefix='validation_1h'
     )
     
     # 8. 데이터 누수 검증 및 세부 가격 분석
@@ -525,42 +592,53 @@ def main():
     test_start = start_idx + split_idx_2
     val_start = start_idx + split_idx_1
     
-    test_timestamps = df_features.index[test_start:test_start + len(X_test)]
-    val_timestamps_seq = df_features.index[val_start:val_start + len(X_val)]
+    # 30분 예측에 대한 데이터 누수 검증
+    print("\n=== 30분 예측 데이터 누수 검증 ===")
+    test_timestamps_30m = df_features.index[test_start:test_start + len(predictions_test_30m)]
+    val_timestamps_30m = df_features.index[val_start:val_start + len(predictions_val_30m)]
     
-    # 테스트 데이터에 대한 데이터 누수 검증
-    print("\n=== 테스트 데이터 누수 검증 ===")
-    test_report = leakage_checker.generate_report(
-        X=X_test,
-        y=y_test,
+    # 30분 예측 타겟 (y_test의 첫 번째 컬럼)
+    y_test_30m = y_test[:, 0] if y_test.ndim == 2 else y_test
+    y_val_30m = y_val[:, 0] if y_val.ndim == 2 else y_val
+    
+    test_report_30m = leakage_checker.generate_report(
+        X=X_test[:len(predictions_test_30m)],
+        y=y_test_30m[:len(predictions_test_30m)],
         feature_names=feature_names,
         target_data=target_data,
         window_size=window_size,
-        prediction_horizon=prediction_horizon,
-        predictions=predictions_test,
-        actuals=actuals_test,
-        df_features=df_features.iloc[test_start:test_start + len(X_test)] if len(df_features) > test_start + len(X_test) else None,
-        timestamps=test_timestamps if len(test_timestamps) == len(X_test) else None,
+        prediction_horizon=6,  # 30분 = 6개 시점
+        predictions=predictions_test_30m,
+        actuals=actuals_test_30m,
+        df_features=df_features.iloc[test_start:test_start + len(predictions_test_30m)] if len(df_features) > test_start + len(predictions_test_30m) else None,
+        timestamps=test_timestamps_30m if len(test_timestamps_30m) == len(predictions_test_30m) else None,
         save_path='results'
     )
-    print(test_report)
+    print(test_report_30m)
     
-    # 검증 데이터에 대한 데이터 누수 검증
-    print("\n=== 검증 데이터 누수 검증 ===")
-    val_report = leakage_checker.generate_report(
-        X=X_val,
-        y=y_val,
+    # 1시간 예측에 대한 데이터 누수 검증
+    print("\n=== 1시간 예측 데이터 누수 검증 ===")
+    test_timestamps_1h = df_features.index[test_start:test_start + len(predictions_test_1h)]
+    val_timestamps_1h = df_features.index[val_start:val_start + len(predictions_val_1h)]
+    
+    # 1시간 예측 타겟 (y_test의 두 번째 컬럼)
+    y_test_1h = y_test[:, 1] if y_test.ndim == 2 else y_test
+    y_val_1h = y_val[:, 1] if y_val.ndim == 2 else y_val
+    
+    test_report_1h = leakage_checker.generate_report(
+        X=X_test[:len(predictions_test_1h)],
+        y=y_test_1h[:len(predictions_test_1h)],
         feature_names=feature_names,
         target_data=target_data,
         window_size=window_size,
-        prediction_horizon=prediction_horizon,
-        predictions=predictions_val,
-        actuals=actuals_val,
-        df_features=df_features.iloc[val_start:val_start + len(X_val)] if len(df_features) > val_start + len(X_val) else None,
-        timestamps=val_timestamps_seq if len(val_timestamps_seq) == len(X_val) else None,
+        prediction_horizon=12,  # 1시간 = 12개 시점
+        predictions=predictions_test_1h,
+        actuals=actuals_test_1h,
+        df_features=df_features.iloc[test_start:test_start + len(predictions_test_1h)] if len(df_features) > test_start + len(predictions_test_1h) else None,
+        timestamps=test_timestamps_1h if len(test_timestamps_1h) == len(predictions_test_1h) else None,
         save_path='results'
     )
-    print(val_report)
+    print(test_report_1h)
     
     print("\n" + "=" * 60)
     print("모든 작업이 완료되었습니다!")

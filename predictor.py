@@ -27,20 +27,20 @@ class Predictor:
     
     def predict(self, X: np.ndarray, previous_prices: np.ndarray = None, target_index: int = 1) -> np.ndarray:
         """
-        예측 수행 (멀티타겟: 3분, 5분, 15분 변화율 예측)
+        예측 수행 (멀티타겟: 30분, 1시간 변화율 예측)
         
         Args:
             X: 입력 데이터 (n_samples, window_size, n_features)
             previous_prices: 이전 가격 (변화율을 절대 가격으로 변환하기 위해 필요)
-            target_index: 사용할 타겟 인덱스 (0: 3분, 1: 5분, 2: 15분, 기본값: 1=5분)
+            target_index: 사용할 타겟 인덱스 (0: 30분, 1: 1시간, 기본값: 1=1시간)
         
         Returns:
             예측값 (원본 스케일 - 선택한 타겟 시점의 close 가격)
         """
-        # 예측 (스케일링된 변화율) - (n_samples, 3)
+        # 예측 (스케일링된 변화율) - (n_samples, 2)
         y_pred_change_scaled = self.model.predict(X, verbose=0)
         
-        # 멀티타겟 역변환 (n_samples, 3)
+        # 멀티타겟 역변환 (n_samples, 2)
         y_pred_changes = self.target_scaler.inverse_transform(y_pred_change_scaled)
         
         # 선택한 타겟의 변화율 추출
@@ -59,19 +59,19 @@ class Predictor:
     
     def predict_multi(self, X: np.ndarray, previous_prices: np.ndarray = None) -> np.ndarray:
         """
-        멀티타겟 예측 (3분, 5분, 15분 변화율 모두 반환)
+        멀티타겟 예측 (30분, 1시간 변화율 모두 반환)
         
         Args:
             X: 입력 데이터 (n_samples, window_size, n_features)
             previous_prices: 이전 가격
         
         Returns:
-            예측 변화율 (n_samples, 3) - [3분, 5분, 15분]
+            예측 변화율 (n_samples, 2) - [30분, 1시간]
         """
-        # 예측 (스케일링된 변화율) - (n_samples, 3)
+        # 예측 (스케일링된 변화율) - (n_samples, 2)
         y_pred_change_scaled = self.model.predict(X, verbose=0)
         
-        # 멀티타겟 역변환 (n_samples, 3)
+        # 멀티타겟 역변환 (n_samples, 2)
         y_pred_changes = self.target_scaler.inverse_transform(y_pred_change_scaled)
         
         # 변화율 클리핑 (극단값 방지)
@@ -85,7 +85,7 @@ class Predictor:
         
         Args:
             sequence: 단일 시퀀스 (window_size, n_features)
-            target_index: 사용할 타겟 인덱스 (0: 3분, 1: 5분, 2: 15분)
+            target_index: 사용할 타겟 인덱스 (0: 30분, 1: 1시간)
         
         Returns:
             예측값
@@ -103,7 +103,7 @@ class Predictor:
             sequence: 단일 시퀀스 (window_size, n_features)
         
         Returns:
-            예측 변화율 (3,) - [3분, 5분, 15분]
+            예측 변화율 (2,) - [30분, 1시간]
         """
         if len(sequence.shape) == 2:
             sequence = sequence.reshape(1, *sequence.shape)

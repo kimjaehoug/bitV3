@@ -62,20 +62,20 @@ class ModelTrainer:
         initial_pred_val = self.model.predict(X_val[:100], verbose=0)  # (100, 3)
         
         # 멀티타겟인지 확인
-        is_multitarget = y_train.ndim == 2 and y_train.shape[1] == 3
+        is_multitarget = y_train.ndim == 2 and y_train.shape[1] == 2
         
         if is_multitarget:
             print(f"초기 예측 (스케일링된 값, 멀티타겟):")
-            for i, label in enumerate(['3분', '5분', '15분']):
+            for i, label in enumerate(['30분', '1시간']):
                 print(f"  {label} - Train 예측 범위: [{initial_pred_train[:, i].min():.4f}, {initial_pred_train[:, i].max():.4f}], 평균: {initial_pred_train[:, i].mean():.4f}")
                 print(f"  {label} - Val 예측 범위: [{initial_pred_val[:, i].min():.4f}, {initial_pred_val[:, i].max():.4f}], 평균: {initial_pred_val[:, i].mean():.4f}")
                 print(f"  {label} - Train 실제 범위: [{y_train[:100, i].min():.4f}, {y_train[:100, i].max():.4f}], 평균: {y_train[:100, i].mean():.4f}")
                 print(f"  {label} - Val 실제 범위: [{y_val[:100, i].min():.4f}, {y_val[:100, i].max():.4f}], 평균: {y_val[:100, i].mean():.4f}")
             
-            # 상관관계 확인 (5분 타겟 기준)
+            # 상관관계 확인 (1시간 타겟 기준)
             train_corr = np.corrcoef(initial_pred_train[:, 1], y_train[:100, 1])[0, 1]
             val_corr = np.corrcoef(initial_pred_val[:, 1], y_val[:100, 1])[0, 1]
-            print(f"초기 상관관계 (5분 타겟): Train={train_corr:.4f}, Val={val_corr:.4f}")
+            print(f"초기 상관관계 (1시간 타겟): Train={train_corr:.4f}, Val={val_corr:.4f}")
         else:
             initial_pred_train = initial_pred_train.flatten()
             initial_pred_val = initial_pred_val.flatten()
@@ -111,15 +111,15 @@ class ModelTrainer:
         
         if is_multitarget:
             print(f"최종 예측 (스케일링된 값, 멀티타겟):")
-            for i, label in enumerate(['3분', '5분', '15분']):
+            for i, label in enumerate(['30분', '1시간']):
                 print(f"  {label} - Train 예측 범위: [{final_pred_train[:, i].min():.4f}, {final_pred_train[:, i].max():.4f}], 평균: {final_pred_train[:, i].mean():.4f}")
                 print(f"  {label} - Val 예측 범위: [{final_pred_val[:, i].min():.4f}, {final_pred_val[:, i].max():.4f}], 평균: {final_pred_val[:, i].mean():.4f}")
             
-            # 상관관계 확인 (5분 타겟 기준)
+            # 상관관계 확인 (1시간 타겟 기준)
             train_corr_final = np.corrcoef(final_pred_train[:, 1], y_train[:100, 1])[0, 1]
             val_corr_final = np.corrcoef(final_pred_val[:, 1], y_val[:100, 1])[0, 1]
-            print(f"최종 상관관계 (5분 타겟): Train={train_corr_final:.4f}, Val={val_corr_final:.4f}")
-            print(f"상관관계 변화 (5분 타겟): Train={train_corr_final-train_corr:.4f}, Val={val_corr_final-val_corr:.4f}")
+            print(f"최종 상관관계 (1시간 타겟): Train={train_corr_final:.4f}, Val={val_corr_final:.4f}")
+            print(f"상관관계 변화 (1시간 타겟): Train={train_corr_final-train_corr:.4f}, Val={val_corr_final-val_corr:.4f}")
         else:
             final_pred_train = final_pred_train.flatten()
             final_pred_val = final_pred_val.flatten()

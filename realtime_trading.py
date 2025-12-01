@@ -86,7 +86,7 @@ class RealtimeTradingSignal:
             window_size=self.window_size,
             prediction_horizon=1,
             target_column='close',
-            scaler_type='robust'
+            scaler_type='standard'
         )
         
         # 스케일러 먼저 로드 (feature 개수 확인용)
@@ -261,9 +261,6 @@ class RealtimeTradingSignal:
         
         df_features = df_features.iloc[min_warmup:].copy()
         
-        # 결측치 처리 (warm-up 제거 후)
-        df_features = df_features.ffill().bfill().fillna(0)
-        
         # 결측치 처리
         df_features = df_features.ffill().bfill().fillna(0)
         
@@ -281,16 +278,12 @@ class RealtimeTradingSignal:
         if self.feature_names is None:
             raise ValueError("feature_names가 설정되지 않았습니다. 스케일러를 먼저 로드하세요.")
         
-        print(f"디버깅: df_clean 컬럼 수: {len(df_clean.columns)}")
-        print(f"디버깅: 스케일러 feature 수: {len(self.feature_names)}개 (중복 포함)")
-        print(f"디버깅: 모델 feature 수: {len(model_feature_names)}개")
-        
         # 모든 feature가 생성되었는지 확인 (스케일러 feature 기준)
         missing_features = [col for col in self.feature_names if col not in df_clean.columns]
         if missing_features:
             raise ValueError(f"Feature가 생성되지 않았습니다. 데이터가 충분하지 않을 수 있습니다. "
                            f"누락된 feature: {missing_features[:10]}... "
-                           f"(총 {len(missing_features)}개). 더 많은 데이터를 수집하거나 warm-up 기간을 늘려주세요.")
+                           f"(총 {len(missing_features)}개).")
         
         # 마지막 window_size 개의 데이터로 시퀀스 생성
         if len(df_clean) < self.window_size:
@@ -350,25 +343,19 @@ class RealtimeTradingSignal:
         
         # 모델이 기대하는 feature 개수 확인 (모델의 실제 입력 shape에서 직접 확인)
         if hasattr(self, 'model') and self.model is not None:
-            # 모델의 입력 shape에서 feature 개수 확인 (가장 확실한 방법)
             try:
                 model_input_shape = self.model.input_shape
                 if model_input_shape and len(model_input_shape) >= 3:
                     model_expected_features = int(model_input_shape[2])  # (batch, timesteps, features)
-                    print(f"디버깅: 모델 입력 shape에서 확인한 feature 개수: {model_expected_features}개")
                 else:
-                    # fallback: num_features 속성 사용
                     model_expected_features = getattr(self, 'num_features', None)
                     if model_expected_features is None:
                         model_expected_features = self.preprocessor.scaler.n_features_in_
-                    print(f"디버깅: num_features 속성에서 확인한 feature 개수: {model_expected_features}개")
             except Exception as e:
-                print(f"⚠️ 경고: 모델 입력 shape 확인 실패: {e}")
                 model_expected_features = getattr(self, 'num_features', None)
                 if model_expected_features is None:
                     model_expected_features = self.preprocessor.scaler.n_features_in_
         else:
-            # 모델이 없으면 num_features 속성 사용
             model_expected_features = getattr(self, 'num_features', None)
             if model_expected_features is None:
                 model_expected_features = self.preprocessor.scaler.n_features_in_
@@ -376,9 +363,6 @@ class RealtimeTradingSignal:
         # 스케일러가 기대하는 feature 개수 확인
         scaler_expected_features = self.preprocessor.scaler.n_features_in_
         model_expected_features = len(model_feature_names)
-        
-        print(f"디버깅: 스케일러 기대 feature: {scaler_expected_features}개, 모델 기대 feature: {model_expected_features}개")
-        print(f"디버깅: 스케일러 데이터 shape: {recent_data_for_scaler.shape}, 모델 데이터 shape: {recent_data_for_model.shape}")
         
         # 스케일링 (스케일러는 이미 로드되어 있어야 함)
         if not self.preprocessor.is_fitted:
@@ -400,23 +384,16 @@ class RealtimeTradingSignal:
                     indices = [i for i, f in enumerate(self.feature_names) if f == col]
                     if indices:
                         model_feature_indices.append(indices[0])  # 첫 번째 인덱스만 사용
-                    else:
-                        print(f"⚠️ 경고: 모델 feature '{col}'가 스케일러 feature 목록에 없습니다.")
-                else:
-                    print(f"⚠️ 경고: 모델 feature '{col}'가 스케일러 feature 목록에 없습니다.")
             
             if len(model_feature_indices) == model_expected_features:
                 # 스케일링된 데이터에서 모델 feature만 선택
                 recent_scaled = recent_scaled_scaler[:, :, model_feature_indices]
-                print(f"디버깅: 스케일링 후 모델 feature 선택 완료: {recent_scaled.shape}")
             else:
-                print(f"⚠️ 경고: 모델 feature 인덱스 매칭 실패 ({len(model_feature_indices)}/{model_expected_features}). 앞 {model_expected_features}개만 사용합니다.")
+                # 인덱스 매칭 실패 시 앞부분만 사용
                 recent_scaled = recent_scaled_scaler[:, :, :model_expected_features]
         else:
             # feature 개수가 같으면 그대로 사용
             recent_scaled = recent_scaled_scaler
-        
-        print(f"디버깅: 최종 입력 shape: {recent_scaled.shape} (모델 기대: (1, {self.window_size}, {model_expected_features}))")
         
         # 현재 가격 (마지막 시점의 close 가격)
         current_price = float(df_clean['close'].iloc[-1])
@@ -523,11 +500,11 @@ class RealtimeTradingSignal:
                 print("디버깅: 첫 실행이므로 이전 입력과 비교할 수 없습니다.")
             self.last_X_input = X[0].copy()
             
-            # 모델 예측 (멀티타겟: 3분, 5분, 15분)
-            y_pred_scaled = self.model.predict(X, verbose=0)  # (1, 3)
+            # 모델 예측 (멀티타겟: 30분, 1시간)
+            y_pred_scaled = self.model.predict(X, verbose=0)  # (1, 2)
             
             # 모델 원시 출력 확인 (스케일링 전)
-            print(f"디버깅: 모델 원시 출력 (스케일링 전) - 3분: {y_pred_scaled[0, 0]:.6f}, 5분: {y_pred_scaled[0, 1]:.6f}, 15분: {y_pred_scaled[0, 2]:.6f}")
+            print(f"디버깅: 모델 원시 출력 (스케일링 전) - 30분: {y_pred_scaled[0, 0]:.6f}, 1시간: {y_pred_scaled[0, 1]:.6f}")
             
             # 이전 예측과 비교
             if hasattr(self, 'last_model_output_scaled'):
@@ -545,49 +522,45 @@ class RealtimeTradingSignal:
             self.last_model_output_scaled = y_pred_scaled[0].copy()
             self._last_X_diff = X_diff  # 다음 실행을 위해 저장
             
-            y_pred_changes = self.preprocessor.target_scaler.inverse_transform(y_pred_scaled)  # (1, 3)
+            y_pred_changes = self.preprocessor.target_scaler.inverse_transform(y_pred_scaled)  # (1, 2)
             
             # 각 타겟의 변화율 추출
-            change_3m = y_pred_changes[0, 0]
-            change_5m = y_pred_changes[0, 1]
-            change_15m = y_pred_changes[0, 2]
+            change_30m = y_pred_changes[0, 0]
+            change_1h = y_pred_changes[0, 1]
             
-            print(f"디버깅: 멀티타겟 예측 변화율 - 3분: {change_3m:.6f}, 5분: {change_5m:.6f}, 15분: {change_15m:.6f}")
+            print(f"디버깅: 멀티타겟 예측 변화율 - 30분: {change_30m:.6f}, 1시간: {change_1h:.6f}")
             
             # 변화율 클리핑 (극단값 방지)
-            change_3m = np.clip(change_3m, -0.5, 0.5)
-            change_5m = np.clip(change_5m, -0.5, 0.5)
-            change_15m = np.clip(change_15m, -0.5, 0.5)
+            change_30m = np.clip(change_30m, -0.5, 0.5)
+            change_1h = np.clip(change_1h, -0.5, 0.5)
             
-            # 5분 타겟을 메인으로 사용 (기존 호환성 유지)
-            y_pred_change = change_5m
+            # 1시간 타겟을 메인으로 사용
+            y_pred_change = change_1h
             
-            # 절대 가격으로 변환 (3분, 5분, 15분)
-            predicted_price_3m = current_price * (1 + change_3m)
-            predicted_price_5m = current_price * (1 + change_5m)
-            predicted_price_15m = current_price * (1 + change_15m)
+            # 절대 가격으로 변환 (30분, 1시간)
+            predicted_price_30m = current_price * (1 + change_30m)
+            predicted_price_1h = current_price * (1 + change_1h)
             
-            # 중기 추세 분석 (15분 변화율이 5분과 같은 방향이면 추세 일관성 높음)
-            trend_consistency = "일관" if (change_5m * change_15m > 0) else "불일치"
+            # 중기 추세 분석 (1시간 변화율이 30분과 같은 방향이면 추세 일관성 높음)
+            trend_consistency = "일관" if (change_30m * change_1h > 0) else "불일치"
             
-            # 시그널 생성 (5분 타겟 기준, 하지만 중기 추세도 고려)
-            # 15분 추세가 강하면 신뢰도 증가
-            confidence = abs(change_5m)
-            if abs(change_15m) > 0.001:  # 15분 추세가 있으면
-                confidence = (abs(change_5m) + abs(change_15m) * 0.5) / 1.5  # 중기 추세 반영
+            # 시그널 생성 (1시간 타겟 기준, 하지만 중기 추세도 고려)
+            # 1시간 추세가 강하면 신뢰도 증가
+            confidence = abs(change_1h)
+            if abs(change_30m) > 0.003:  # 30분 추세가 있으면 (0.3% 이상)
+                confidence = (abs(change_1h) + abs(change_30m) * 0.5) / 1.5  # 중기 추세 반영
             
-            signal_info = self._generate_signal(current_price, predicted_price_5m, confidence)
+            signal_info = self._generate_signal(current_price, predicted_price_1h, confidence)
             
             # 멀티타겟 정보 추가
-            signal_info['change_3m'] = change_3m
-            signal_info['change_5m'] = change_5m
-            signal_info['change_15m'] = change_15m
-            signal_info['predicted_price_3m'] = predicted_price_3m
-            signal_info['predicted_price_15m'] = predicted_price_15m
+            signal_info['change_30m'] = change_30m
+            signal_info['change_1h'] = change_1h
+            signal_info['predicted_price_30m'] = predicted_price_30m
+            signal_info['predicted_price_1h'] = predicted_price_1h
             signal_info['trend_consistency'] = trend_consistency
             
-            # 이전 예측값 저장 (5분 타겟 사용)
-            self.last_prediction = predicted_price_5m
+            # 이전 예측값 저장 (1시간 타겟 사용)
+            self.last_prediction = predicted_price_1h
             self.last_price = current_price
             
             return {
@@ -629,9 +602,8 @@ class RealtimeTradingSignal:
                     print("=" * 60)
                     print(f"현재 가격: ${result['current_price']:,.2f}")
                     print(f"\n예측 가격:")
-                    print(f"  3분 후: ${result.get('predicted_price_3m', result['predicted_price']):,.2f} ({result.get('change_3m', 0)*100:+.2f}%)")
-                    print(f"  5분 후: ${result['predicted_price']:,.2f} ({result['price_change_pct']:+.2f}%)")
-                    print(f"  15분 후: ${result.get('predicted_price_15m', result['predicted_price']):,.2f} ({result.get('change_15m', 0)*100:+.2f}%)")
+                    print(f"  30분 후: ${result.get('predicted_price_30m', result['predicted_price']):,.2f} ({result.get('change_30m', 0)*100:+.2f}%)")
+                    print(f"  1시간 후: ${result['predicted_price']:,.2f} ({result['price_change_pct']:+.2f}%)")
                     print(f"\n시그널: {result['signal']}")
                     print(f"강도: {result['strength']:.2f}x")
                     print(f"신뢰도: {result['confidence']:.2f}%")
@@ -685,9 +657,8 @@ def main():
             print("=" * 60)
             print(f"현재 가격: ${result['current_price']:,.2f}")
             print(f"\n예측 가격:")
-            print(f"  3분 후: ${result.get('predicted_price_3m', result['predicted_price']):,.2f} ({result.get('change_3m', 0)*100:+.2f}%)")
-            print(f"  5분 후: ${result['predicted_price']:,.2f} ({result['price_change_pct']:+.2f}%)")
-            print(f"  15분 후: ${result.get('predicted_price_15m', result['predicted_price']):,.2f} ({result.get('change_15m', 0)*100:+.2f}%)")
+            print(f"  30분 후: ${result.get('predicted_price_30m', result['predicted_price']):,.2f} ({result.get('change_30m', 0)*100:+.2f}%)")
+            print(f"  1시간 후: ${result['predicted_price']:,.2f} ({result['price_change_pct']:+.2f}%)")
             print(f"\n시그널: {result['signal']}")
             print(f"강도: {result['strength']:.2f}x")
             print(f"신뢰도: {result['confidence']:.2f}%")
@@ -708,45 +679,64 @@ class RealtimeTrader:
                  window_size: int = 60,
                  api_key: Optional[str] = None,
                  api_secret: Optional[str] = None,
-                 leverage: int = 30,
-                 take_profit_roi: float = 0.05):  # 5% ROI
+                 leverage: int = 10,
+                 take_profit_roi: float = 0.08,  # 10% ROI
+                 stop_loss_roi: float = 0.02,  # 3% 손절
+                 dry_run: bool = False):  # 시뮬레이션 모드
         """
         Args:
             model_path: 학습된 모델 파일 경로
             window_size: 슬라이딩 윈도우 크기
             api_key: 바이낸스 API 키 (환경변수 BINANCE_API_KEY에서도 읽을 수 있음)
             api_secret: 바이낸스 API 시크릿 (환경변수 BINANCE_API_SECRET에서도 읽을 수 있음)
-            leverage: 레버리지 배수 (기본값: 30)
-            take_profit_roi: Take Profit ROI (기본값: 0.05 = 5%)
+            leverage: 레버리지 배수 (기본값: 10)
+            take_profit_roi: Take Profit ROI (기본값: 0.10 = 10%)
+            stop_loss_roi: Stop Loss ROI (기본값: 0.03 = 3%)
+            dry_run: 시뮬레이션 모드 (True면 실제 거래 안 함, 기본값: False)
         """
         self.model_path = model_path
         self.window_size = window_size
         self.leverage = leverage
         self.take_profit_roi = take_profit_roi
+        self.stop_loss_roi = stop_loss_roi
+        self.dry_run = dry_run
         
         # API 키 설정 (.env 파일 또는 환경변수에서 읽기)
         self.api_key = api_key or os.getenv('BINANCE_API_KEY')
         self.api_secret = api_secret or os.getenv('BINANCE_API_SECRET')
         
-        if not self.api_key or not self.api_secret:
-            raise ValueError(
-                "바이낸스 API 키와 시크릿이 필요합니다.\n"
-                "다음 중 하나의 방법으로 설정하세요:\n"
-                "1. .env 파일에 BINANCE_API_KEY와 BINANCE_API_SECRET 추가\n"
-                "2. 환경변수 BINANCE_API_KEY, BINANCE_API_SECRET 설정\n"
-                "3. 생성자에 api_key, api_secret 직접 전달"
-            )
+        # 시뮬레이션 모드가 아니면 API 키 필요
+        if not self.dry_run:
+            if not self.api_key or not self.api_secret:
+                raise ValueError(
+                    "바이낸스 API 키와 시크릿이 필요합니다.\n"
+                    "다음 중 하나의 방법으로 설정하세요:\n"
+                    "1. .env 파일에 BINANCE_API_KEY와 BINANCE_API_SECRET 추가\n"
+                    "2. 환경변수 BINANCE_API_KEY, BINANCE_API_SECRET 설정\n"
+                    "3. 생성자에 api_key, api_secret 직접 전달\n"
+                    "또는 --simulate 플래그를 사용하여 시뮬레이션 모드로 실행하세요"
+                )
         
         # 바이낸스 선물 거래소 초기화
-        self.exchange = ccxt.binance({
-            'apiKey': self.api_key,
-            'secret': self.api_secret,
-            'options': {
-                'defaultType': 'future',  # 선물 거래
-            },
-            'enableRateLimit': True,
-            'sandbox': False,  # 실제 거래 (테스트는 True로 설정)
-        })
+        if self.dry_run:
+            # 시뮬레이션 모드: API 키 없이도 공개 데이터만 사용
+            self.exchange = ccxt.binance({
+                'options': {
+                    'defaultType': 'future',  # 선물 거래
+                },
+                'enableRateLimit': True,
+            })
+        else:
+            # 실거래 모드: API 키 필요
+            self.exchange = ccxt.binance({
+                'apiKey': self.api_key,
+                'secret': self.api_secret,
+                'options': {
+                    'defaultType': 'future',  # 선물 거래
+                },
+                'enableRateLimit': True,
+                'sandbox': False,  # 실제 거래
+            })
         self.symbol = 'BTC/USDT'
         
         # 시그널 생성기 초기화
@@ -761,18 +751,37 @@ class RealtimeTrader:
         # 현재 포지션 정보
         self.current_position = None  # {'side': 'long', 'entry_price': float, 'size': float, 'entry_time': datetime}
         
-        # 거래 조건 (3분봉 제외)
-        self.min_change_5m = 0.0012  # 0.12%
-        self.min_change_15m = 0.0020  # 0.20%
+        # 포지션 추적 및 쿨다운
+        self.last_position_info = None  # 이전 포지션 정보 (진입 금액, 진입 시간 등)
+        self.trade_cooldown_until = None  # 거래 쿨다운 종료 시간 (손실 후 15분 대기)
+        self.cooldown_duration_minutes = 90  # 손실 후 쿨다운 시간 (분)
+        
+        # 거래 조건
+        self.min_change_30m = 0.004  # 0.4%
+        self.min_change_1h = 0.003  # 0.2%
+        self.strong_signal_threshold = 0.009  # 0.9% (강한 신호 기준)
         
         print("=" * 60)
-        print("실시간 자동 거래 시스템 초기화 완료")
+        if self.dry_run:
+            print("실시간 분석 시스템 초기화 완료 (시뮬레이션 모드)")
+            print("⚠️ 실제 거래는 수행하지 않습니다")
+        else:
+            print("실시간 자동 거래 시스템 초기화 완료")
         print(f"레버리지: {leverage}배")
         print(f"Take Profit ROI: {take_profit_roi*100:.1f}%")
+        print(f"Stop Loss ROI: {stop_loss_roi*100:.1f}%")
         print("=" * 60)
     
     def get_account_balance(self) -> Dict:
         """계좌 잔액 조회"""
+        if self.dry_run:
+            # 시뮬레이션 모드: 더미 데이터 반환
+            return {
+                'free': 1000.0,  # 시뮬레이션용 더미 금액
+                'total': 1000.0,
+                'available': 1000.0
+            }
+        
         try:
             balance = self.exchange.fetch_balance()
             usdt_balance = balance.get('USDT', {})
@@ -790,6 +799,10 @@ class RealtimeTrader:
     
     def get_current_position(self) -> Optional[Dict]:
         """현재 포지션 조회"""
+        if self.dry_run:
+            # 시뮬레이션 모드: 포지션 없음
+            return None
+        
         try:
             positions = self.exchange.fetch_positions([self.symbol])
             for pos in positions:
@@ -815,17 +828,21 @@ class RealtimeTrader:
         except Exception as e:
             print(f"레버리지 설정 실패: {e}")
     
-    def open_short_position(self, amount_usdt: float, roi: Optional[float] = None) -> bool:
-        """숏 포지션 열기 (시장가, 30배 레버리지, TP 자동 설정)
+    def open_short_position(self, amount_usdt: float, roi: Optional[float] = None, sl: Optional[float] = None) -> bool:
+        """숏 포지션 열기 (시장가, 레버리지, TP/SL 자동 설정)
         
         Args:
             amount_usdt: 사용할 USDT 금액
             roi: Take Profit ROI (None이면 기본값 self.take_profit_roi 사용)
+            sl: Stop Loss ROI (None이면 기본값 self.stop_loss_roi 사용)
         """
         try:
             # ROI 설정 (파라미터가 없으면 기본값 사용)
             if roi is None:
                 roi = self.take_profit_roi
+            # SL 설정 (파라미터가 없으면 기본값 사용)
+            if sl is None:
+                sl = self.stop_loss_roi
             
             # 레버리지 설정
             self.set_leverage(self.leverage)
@@ -842,7 +859,7 @@ class RealtimeTrader:
             # 실제 사용 가능한 마진 계산
             usable_margin = amount_usdt * margin_buffer * (1 - fee_rate)
             
-            # 레버리지 30배를 사용하므로, 포지션 가치 = 마진 * 레버리지
+            # 포지션 가치 = 마진 * 레버리지
             position_value = usable_margin * self.leverage
             
             # BTC 수량 계산 (포지션 가치를 현재 가격으로 나눔)
@@ -877,7 +894,7 @@ class RealtimeTrader:
             print(f"   레버리지: {self.leverage}배")
             
             # Take Profit 가격 계산 (레버리지 고려)
-            # 레버리지 30배일 때, 실제 자본 대비 ROI 수익 = 가격 변동 ROI/30
+            # 레버리지일 때, 실제 자본 대비 ROI 수익 = 가격 변동 ROI/레버리지
             # 숏이므로 가격 하락 시 수익
             take_profit_price = current_price * (1 - roi / self.leverage)
             
@@ -921,7 +938,54 @@ class RealtimeTrader:
             except Exception as tp_error:
                 print(f"⚠️ Take Profit 주문 생성 실패: {tp_error}")
                 print(f"   바이낸스 웹사이트에서 수동으로 TP를 설정하거나 포지션을 모니터링해야 합니다")
-                print(f"   권장 TP 가격: ${take_profit_price:,.2f} (ROI {self.take_profit_roi*100:.1f}%)")
+                print(f"   권장 TP 가격: ${take_profit_price:,.2f} (ROI {roi*100:.1f}%)")
+            
+            # Stop Loss 가격 계산 (레버리지 고려)
+            # 레버리지일 때, 실제 자본 대비 손실 = 가격 변동 손절%/레버리지
+            # 숏이므로 가격 상승 시 손실
+            stop_loss_price = current_price * (1 + sl / self.leverage)
+            
+            # Stop Loss 주문 생성 (바이낸스에서 자동으로 포지션 닫기)
+            try:
+                try:
+                    # STOP_MARKET 주문 (closePosition: True 사용 시 수량 불필요)
+                    sl_order = self.exchange.create_order(
+                        self.symbol,
+                        'STOP_MARKET',
+                        'buy',  # 숏 포지션을 닫기 위해 매수
+                        None,  # closePosition: True일 때는 수량 불필요
+                        None,
+                        params={
+                            'stopPrice': stop_loss_price,
+                            'closePosition': True
+                        }
+                    )
+                except Exception as e1:
+                    try:
+                        # STOP 주문 (triggerPrice 필요, closePosition 사용)
+                        sl_order = self.exchange.create_order(
+                            self.symbol,
+                            'STOP',
+                            'buy',
+                            None,  # closePosition 사용 시 수량 불필요
+                            None,
+                            params={
+                                'triggerPrice': stop_loss_price,
+                                'closePosition': True,
+                                'timeInForce': 'GTC'
+                            }
+                        )
+                    except Exception as e2:
+                        raise Exception(f"SL 주문 생성 실패 (방법 1: {e1}, 방법 2: {e2})")
+                
+                print(f"✅ Stop Loss 주문 생성 성공")
+                print(f"   SL 주문 ID: {sl_order.get('id', 'N/A')}")
+                print(f"   SL 가격: ${stop_loss_price:,.2f} (손절 {sl*100:.1f}%)")
+                print(f"   → 가격이 ${stop_loss_price:,.2f}에 도달하면 바이낸스에서 자동으로 포지션이 닫힙니다")
+            except Exception as sl_error:
+                print(f"⚠️ Stop Loss 주문 생성 실패: {sl_error}")
+                print(f"   바이낸스 웹사이트에서 수동으로 SL을 설정하거나 포지션을 모니터링해야 합니다")
+                print(f"   권장 SL 가격: ${stop_loss_price:,.2f} (손절 {sl*100:.1f}%)")
             
             return True
         except Exception as e:
@@ -930,17 +994,21 @@ class RealtimeTrader:
             traceback.print_exc()
             return False
     
-    def open_long_position(self, amount_usdt: float, roi: Optional[float] = None) -> bool:
-        """롱 포지션 열기 (시장가, 30배 레버리지, TP 자동 설정)
+    def open_long_position(self, amount_usdt: float, roi: Optional[float] = None, sl: Optional[float] = None) -> bool:
+        """롱 포지션 열기 (시장가, 레버리지, TP/SL 자동 설정)
         
         Args:
             amount_usdt: 사용할 USDT 금액
             roi: Take Profit ROI (None이면 기본값 self.take_profit_roi 사용)
+            sl: Stop Loss ROI (None이면 기본값 self.stop_loss_roi 사용)
         """
         try:
             # ROI 설정 (파라미터가 없으면 기본값 사용)
             if roi is None:
                 roi = self.take_profit_roi
+            # SL 설정 (파라미터가 없으면 기본값 사용)
+            if sl is None:
+                sl = self.stop_loss_roi
             
             # 레버리지 설정
             self.set_leverage(self.leverage)
@@ -957,7 +1025,7 @@ class RealtimeTrader:
             # 실제 사용 가능한 마진 계산
             usable_margin = amount_usdt * margin_buffer * (1 - fee_rate)
             
-            # 레버리지 30배를 사용하므로, 포지션 가치 = 마진 * 레버리지
+            # 포지션 가치 = 마진 * 레버리지
             position_value = usable_margin * self.leverage
             
             # BTC 수량 계산 (포지션 가치를 현재 가격으로 나눔)
@@ -992,7 +1060,7 @@ class RealtimeTrader:
             print(f"   레버리지: {self.leverage}배")
             
             # Take Profit 가격 계산 (레버리지 고려)
-            # 레버리지 30배일 때, 실제 자본 대비 ROI 수익 = 가격 변동 ROI/30
+            # 레버리지일 때, 실제 자본 대비 ROI 수익 = 가격 변동 ROI/레버리지
             take_profit_price = current_price * (1 + roi / self.leverage)
             
             # Take Profit 주문 생성 (바이낸스에서 자동으로 포지션 닫기)
@@ -1038,6 +1106,53 @@ class RealtimeTrader:
                 print(f"   바이낸스 웹사이트에서 수동으로 TP를 설정하거나 포지션을 모니터링해야 합니다")
                 print(f"   권장 TP 가격: ${take_profit_price:,.2f} (ROI {roi*100:.1f}%)")
                 # TP 주문 실패해도 포지션은 열렸으므로 계속 진행
+            
+            # Stop Loss 가격 계산 (레버리지 고려)
+            # 레버리지일 때, 실제 자본 대비 손실 = 가격 변동 손절%/레버리지
+            # 롱이므로 가격 하락 시 손실
+            stop_loss_price = current_price * (1 - sl / self.leverage)
+            
+            # Stop Loss 주문 생성 (바이낸스에서 자동으로 포지션 닫기)
+            try:
+                try:
+                    # STOP_MARKET 주문 (closePosition: True 사용 시 수량 불필요)
+                    sl_order = self.exchange.create_order(
+                        self.symbol,
+                        'STOP_MARKET',
+                        'sell',  # 롱 포지션을 닫기 위해 매도
+                        None,  # closePosition: True일 때는 수량 불필요
+                        None,
+                        params={
+                            'stopPrice': stop_loss_price,
+                            'closePosition': True
+                        }
+                    )
+                except Exception as e1:
+                    try:
+                        # STOP 주문 (triggerPrice 필요, closePosition 사용)
+                        sl_order = self.exchange.create_order(
+                            self.symbol,
+                            'STOP',
+                            'sell',
+                            None,  # closePosition 사용 시 수량 불필요
+                            None,
+                            params={
+                                'triggerPrice': stop_loss_price,
+                                'closePosition': True,
+                                'timeInForce': 'GTC'
+                            }
+                        )
+                    except Exception as e2:
+                        raise Exception(f"SL 주문 생성 실패 (방법 1: {e1}, 방법 2: {e2})")
+                
+                print(f"✅ Stop Loss 주문 생성 성공")
+                print(f"   SL 주문 ID: {sl_order.get('id', 'N/A')}")
+                print(f"   SL 가격: ${stop_loss_price:,.2f} (손절 {sl*100:.1f}%)")
+                print(f"   → 가격이 ${stop_loss_price:,.2f}에 도달하면 바이낸스에서 자동으로 포지션이 닫힙니다")
+            except Exception as sl_error:
+                print(f"⚠️ Stop Loss 주문 생성 실패: {sl_error}")
+                print(f"   바이낸스 웹사이트에서 수동으로 SL을 설정하거나 포지션을 모니터링해야 합니다")
+                print(f"   권장 SL 가격: ${stop_loss_price:,.2f} (손절 {sl*100:.1f}%)")
             
             return True
         except Exception as e:
@@ -1085,55 +1200,139 @@ class RealtimeTrader:
             return False
     
     def check_existing_tp_orders(self) -> bool:
-        """기존 TP 주문 확인 (바이낸스에서 자동으로 처리하므로 확인만)"""
+        """기존 TP/SL 주문 확인 (바이낸스에서 자동으로 처리하므로 확인만)"""
+        if self.dry_run:
+            return False
+        
         try:
             # 열린 주문 조회
             open_orders = self.exchange.fetch_open_orders(self.symbol)
             tp_orders = [o for o in open_orders if o.get('type') == 'TAKE_PROFIT_MARKET' or 'TAKE_PROFIT' in o.get('type', '')]
+            sl_orders = [o for o in open_orders if o.get('type') == 'STOP_MARKET' or o.get('type') == 'STOP']
             
+            has_orders = False
             if tp_orders:
                 print(f"📋 활성 TP 주문: {len(tp_orders)}개")
                 for tp in tp_orders:
                     print(f"   TP 주문 ID: {tp.get('id')}, 가격: ${tp.get('stopPrice', tp.get('price', 0)):,.2f}")
-                return True
-            else:
-                return False
+                has_orders = True
+            
+            if sl_orders:
+                print(f"🛑 활성 SL 주문: {len(sl_orders)}개")
+                for sl in sl_orders:
+                    print(f"   SL 주문 ID: {sl.get('id')}, 가격: ${sl.get('stopPrice', sl.get('price', 0)):,.2f}")
+                has_orders = True
+            
+            return has_orders
         except Exception as e:
-            print(f"⚠️ TP 주문 확인 실패: {e}")
+            print(f"⚠️ TP/SL 주문 확인 실패: {e}")
             return False
     
-    def check_trade_conditions(self, change_3m: float, change_5m: float, change_15m: float) -> Optional[str]:
+    def _check_position_close_result(self, previous_position: dict):
+        """포지션이 닫혔을 때 손익 확인 및 쿨다운 설정
+        
+        Args:
+            previous_position: 이전 포지션 정보 (side, entry_price, current_price, roi 등)
+        """
+        try:
+            # 포지션 종료 시점의 실제 손익 확인
+            # 현재 가격을 조회하여 실제 종료 가격으로 사용
+            try:
+                ticker = self.exchange.fetch_ticker(self.symbol)
+                close_price = ticker['last']
+            except:
+                # 가격 조회 실패 시 이전 정보 사용
+                close_price = previous_position.get('current_price', previous_position.get('entry_price', 0))
+            
+            entry_price = previous_position.get('entry_price', 0)
+            side = previous_position.get('side', 'long')
+            
+            if entry_price > 0 and close_price > 0:
+                # 실제 종료 가격으로 ROI 재계산
+                if side == 'long':
+                    final_roi = (close_price - entry_price) / entry_price
+                else:  # short
+                    final_roi = (entry_price - close_price) / entry_price
+                
+                # ROI가 음수이면 손실
+                entry_amount = previous_position.get('entry_amount_usdt', 0)
+                
+                if final_roi < 0:
+                    # 손실 발생 - 15분 쿨다운 설정
+                    self.trade_cooldown_until = datetime.now() + timedelta(minutes=self.cooldown_duration_minutes)
+                    print(f"\n⚠️ 포지션 손실 발생!")
+                    if entry_amount > 0:
+                        print(f"   진입 금액: ${entry_amount:,.2f} USDT")
+                    print(f"   진입 가격: ${entry_price:,.2f}")
+                    print(f"   종료 가격: ${close_price:,.2f}")
+                    print(f"   손실 ROI: {final_roi*100:.2f}%")
+                    print(f"   🕐 거래 쿨다운: {self.cooldown_duration_minutes}분 동안 거래 중단")
+                    print(f"   쿨다운 종료 시간: {self.trade_cooldown_until.strftime('%Y-%m-%d %H:%M:%S')}")
+                else:
+                    # 수익 발생 - 쿨다운 없음
+                    print(f"\n✅ 포지션 수익 발생!")
+                    if entry_amount > 0:
+                        print(f"   진입 금액: ${entry_amount:,.2f} USDT")
+                    print(f"   진입 가격: ${entry_price:,.2f}")
+                    print(f"   종료 가격: ${close_price:,.2f}")
+                    print(f"   수익 ROI: {final_roi*100:.2f}%")
+                    self.trade_cooldown_until = None
+            else:
+                # 정보가 부족한 경우 이전 정보 사용
+                roi = previous_position.get('roi', 0.0)
+                unrealized_pnl = previous_position.get('unrealized_pnl', 0.0)
+                
+                if roi < 0 or unrealized_pnl < 0:
+                    # 손실 발생 - 15분 쿨다운 설정
+                    self.trade_cooldown_until = datetime.now() + timedelta(minutes=self.cooldown_duration_minutes)
+                    print(f"\n⚠️ 포지션 손실 발생! (이전 정보 기준)")
+                    print(f"   손실 ROI: {roi*100:.2f}%")
+                    print(f"   손실 금액: ${abs(unrealized_pnl):,.2f}")
+                    print(f"   🕐 거래 쿨다운: {self.cooldown_duration_minutes}분 동안 거래 중단")
+                    print(f"   쿨다운 종료 시간: {self.trade_cooldown_until.strftime('%Y-%m-%d %H:%M:%S')}")
+                else:
+                    # 수익 발생 - 쿨다운 없음
+                    print(f"\n✅ 포지션 수익 발생! (이전 정보 기준)")
+                    print(f"   수익 ROI: {roi*100:.2f}%")
+                    print(f"   수익 금액: ${unrealized_pnl:,.2f}")
+                    self.trade_cooldown_until = None
+                
+        except Exception as e:
+            print(f"⚠️ 포지션 종료 결과 확인 실패: {e}")
+            import traceback
+            traceback.print_exc()
+            # 오류 발생 시에도 쿨다운은 설정하지 않음
+    
+    def check_trade_conditions(self, change_30m: float, change_1h: float) -> Optional[str]:
         """거래 조건 확인
         
         조건:
-        - 5분봉 변화율 >= 0.12%
-        - 15분봉 변화율 >= 0.20%
-        - 5분봉과 15분봉이 같은 부호
-        (3분봉은 조건에서 제외)
+        - 롱 신호: 30분봉 >= 0.4%, 1시간봉 >= 0.2%, 둘 다 양수
+        - 숏 신호: 30분봉 >= min_change_30m, 1시간봉 >= min_change_1h, 둘 다 음수
         
         Returns:
             'long': 롱 주문 조건 충족
             'short': 숏 주문 조건 충족
             None: 조건 미충족
         """
-        # 최소 변화율 조건 확인 (5분봉, 15분봉만)
-        # 부동소수점 오차를 고려하여 >= 비교 사용
-        epsilon = 1e-8  # 매우 작은 epsilon (부동소수점 오차 보정용)
-        if abs(change_5m) < self.min_change_5m - epsilon:
-            return None
-        if abs(change_15m) < self.min_change_15m - epsilon:
-            return None
+        epsilon = 1e-8
         
-        # 같은 부호 확인
-        both_positive = change_5m > 0 and change_15m > 0
-        both_negative = change_5m < 0 and change_15m < 0
-        
+        # 롱 신호 체크 (별도 임계값 사용)
+        both_positive = change_30m > 0 and change_1h > 0
         if both_positive:
-            return 'long'  # 롱 주문
-        elif both_negative:
-            return 'short'  # 숏 주문
-        else:
-            return None  # 조건 미충족
+            # 롱 신호: 30분봉 0.4%, 1시간봉 0.2%
+            min_change_30m_long = 0.004  # 0.4%
+            min_change_1h_long = 0.002  # 0.2%
+            if abs(change_30m) >= min_change_30m_long - epsilon and abs(change_1h) >= min_change_1h_long - epsilon:
+                return 'long'
+        
+        # 숏 신호 체크 (기존 임계값 사용)
+        both_negative = change_30m < 0 and change_1h < 0
+        if both_negative:
+            if abs(change_30m) >= self.min_change_30m - epsilon and abs(change_1h) >= self.min_change_1h - epsilon:
+                return 'short'
+        
+        return None
     
     def execute_trading_cycle(self):
         """한 번의 거래 사이클 실행 (1분마다)"""
@@ -1147,18 +1346,22 @@ class RealtimeTrader:
                 return
             
             # 예측 결과 출력
-            change_3m = result.get('change_3m', 0)
-            change_5m = result.get('change_5m', 0)
-            change_15m = result.get('change_15m', 0)
+            change_30m = result.get('change_30m', 0)
+            change_1h = result.get('change_1h', 0)
             current_price = result.get('current_price', 0)
             
             print("\n" + "=" * 60)
             print("예측 결과")
             print("=" * 60)
             print(f"현재 가격: ${current_price:,.2f}")
-            print(f"3분봉 변화율: {change_3m*100:+.2f}%")
-            print(f"5분봉 변화율: {change_5m*100:+.2f}%")
-            print(f"15분봉 변화율: {change_15m*100:+.2f}%")
+            print(f"30분봉 변화율: {change_30m*100:+.2f}%")
+            print(f"1시간봉 변화율: {change_1h*100:+.2f}%")
+            
+            # 강한 신호 판단 (30분봉과 1시간봉 모두 0.9% 이상)
+            is_strong_signal = (abs(change_30m) >= self.strong_signal_threshold and 
+                               abs(change_1h) >= self.strong_signal_threshold)
+            if is_strong_signal:
+                print(f"\n🔥 강한 신호 감지! (30분봉: {abs(change_30m)*100:.2f}%, 1시간봉: {abs(change_1h)*100:.2f}% 모두 0.9% 이상)")
             
             # 1.5. 시장 지표 분석
             print("\n" + "-" * 60)
@@ -1171,7 +1374,9 @@ class RealtimeTrader:
                 
                 # 오더북 불균형
                 ob = indicators.get('orderbook_imbalance', {})
-                print(f"📊 오더북 불균형: {ob.get('imbalance_strength', 'neutral')} (비율: {ob.get('imbalance_ratio', 0)*100:+.2f}%)")
+                imbalance_ratio = ob.get('imbalance_ratio', 0)
+                spread_pct = ob.get('spread_pct', 0)
+                print(f"📊 오더북 불균형: {ob.get('imbalance_strength', 'neutral')} (비율: {imbalance_ratio*100:+.2f}%, 스프레드: {spread_pct:.3f}%)")
                 
                 # 청산 클러스터
                 lc = indicators.get('liquidation_clusters', {})
@@ -1203,12 +1408,49 @@ class RealtimeTrader:
             # 2. 계좌 정보 조회 및 표시
             balance = self.get_account_balance()
             print(f"\n계좌 정보")
-            print(f"  총 자산: ${balance['total']:,.2f} USDT")
+            if self.dry_run:
+                print(f"  [시뮬레이션] 총 자산: ${balance['total']:,.2f} USDT (더미 데이터)")
+            else:
+                print(f"  총 자산: ${balance['total']:,.2f} USDT")
             print(f"  거래 가능: ${balance['available']:,.2f} USDT")
             print(f"  사용 중: ${balance['total'] - balance['available']:,.2f} USDT")
             
             # 3. 현재 포지션 확인
             position = self.get_current_position()
+            
+            # 포지션 상태 변경 감지 (이전에 포지션이 있었는데 현재는 없는 경우)
+            previous_position = self.last_position_info
+            if previous_position and not position:
+                # 포지션이 닫혔음 - 손익 확인
+                self._check_position_close_result(previous_position)
+            
+            # 현재 포지션이 있으면 정보 업데이트
+            if position:
+                # 포지션 정보 저장 (다음 사이클에서 상태 변경 감지용)
+                position_roi = 0.0
+                if position['side'] == 'long':
+                    position_roi = (position['mark_price'] - position['entry_price']) / position['entry_price']
+                else:
+                    position_roi = (position['entry_price'] - position['mark_price']) / position['entry_price']
+                
+                # 포지션 정보 저장 (진입 금액 계산: 포지션 가치 / 레버리지)
+                # 포지션 가치 = size * entry_price
+                position_value = position['size'] * position['entry_price']
+                entry_amount_usdt = position_value / self.leverage  # 실제 사용한 마진
+                
+                self.last_position_info = {
+                    'side': position['side'],
+                    'entry_price': position['entry_price'],
+                    'entry_amount_usdt': entry_amount_usdt,
+                    'current_price': position['mark_price'],
+                    'roi': position_roi,
+                    'unrealized_pnl': position['unrealized_pnl'],
+                    'timestamp': datetime.now()
+                }
+            else:
+                # 포지션이 없으면 이전 포지션 정보도 None으로 설정 (다음 사이클에서 변경 감지 안 함)
+                if previous_position:
+                    self.last_position_info = None
             
             if position:
                 print(f"\n현재 포지션: {position['side'].upper()}")
@@ -1216,7 +1458,7 @@ class RealtimeTrader:
                 print(f"현재 가격: ${position['mark_price']:,.2f}")
                 print(f"미실현 손익: ${position['unrealized_pnl']:,.2f} ({position['percentage']:.2f}%)")
                 
-                # 4. TP 주문 확인 (바이낸스에서 자동으로 처리하므로 확인만)
+                # 4. TP/SL 주문 확인 (바이낸스에서 자동으로 처리하므로 확인만)
                 self.check_existing_tp_orders()
                 
                 # ROI 계산 및 표시
@@ -1236,8 +1478,22 @@ class RealtimeTrader:
             else:
                 print("\n현재 포지션 없음")
                 
+                # 쿨다운 체크
+                if self.trade_cooldown_until and datetime.now() < self.trade_cooldown_until:
+                    remaining_minutes = (self.trade_cooldown_until - datetime.now()).total_seconds() / 60
+                    print(f"\n⏸️ 거래 쿨다운 중... (손실 후 {self.cooldown_duration_minutes}분 대기)")
+                    print(f"   남은 시간: {remaining_minutes:.1f}분")
+                    print(f"   쿨다운 종료 시간: {self.trade_cooldown_until.strftime('%Y-%m-%d %H:%M:%S')}")
+                    print(f"   → 거래 조건 확인을 건너뜁니다")
+                    print("=" * 60)
+                    return  # 쿨다운 중이면 거래 조건 확인하지 않고 종료
+                elif self.trade_cooldown_until and datetime.now() >= self.trade_cooldown_until:
+                    # 쿨다운이 만료됨
+                    print(f"\n✅ 거래 쿨다운 종료! 다시 거래 가능합니다.")
+                    self.trade_cooldown_until = None
+                
                 # 4. 거래 조건 확인 (롱/숏)
-                trade_signal = self.check_trade_conditions(change_3m, change_5m, change_15m)
+                trade_signal = self.check_trade_conditions(change_30m, change_1h)
                 
                 # 4.5. 시장 지표 방향 확인
                 market_signal_value = market_signal.get('signal', 'neutral')
@@ -1252,44 +1508,44 @@ class RealtimeTrader:
                 else:
                     market_direction = None  # neutral
                 
-                # 4.6. 종합 조건 확인: 5분봉, 15분봉, 시장 지표 모두 같은 방향이어야 함
+                # 4.6. 종합 조건 확인: 30분봉, 1시간봉, 시장 지표 모두 같은 방향이어야 함
                 final_trade_signal = None
                 
                 if trade_signal:
-                    # 5분봉 방향 확인
-                    direction_5m = 'long' if change_5m > 0 else ('short' if change_5m < 0 else None)
-                    # 15분봉 방향 확인
-                    direction_15m = 'long' if change_15m > 0 else ('short' if change_15m < 0 else None)
+                    # 30분봉 방향 확인
+                    direction_30m = 'long' if change_30m > 0 else ('short' if change_30m < 0 else None)
+                    # 1시간봉 방향 확인
+                    direction_1h = 'long' if change_1h > 0 else ('short' if change_1h < 0 else None)
                     
                     print(f"\n📊 방향성 분석:")
-                    print(f"   5분봉 예측: {direction_5m} ({change_5m*100:+.2f}%)")
-                    print(f"   15분봉 예측: {direction_15m} ({change_15m*100:+.2f}%)")
+                    print(f"   30분봉 예측: {direction_30m} ({change_30m*100:+.2f}%)")
+                    print(f"   1시간봉 예측: {direction_1h} ({change_1h*100:+.2f}%)")
                     print(f"   시장 지표: {market_direction} ({market_signal_value}, 신뢰도: {market_confidence*100:.1f}%)")
                     
                     # 세 가지가 모두 같은 방향인지 확인
                     if trade_signal == 'long':
-                        if direction_5m == 'long' and direction_15m == 'long' and market_direction == 'long':
+                        if direction_30m == 'long' and direction_1h == 'long' and market_direction == 'long':
                             final_trade_signal = 'long'
-                            print(f"\n✅ 롱 주문 조건 충족! (5분봉, 15분봉, 시장지표 모두 상승 방향)")
+                            print(f"\n✅ 롱 주문 조건 충족! (30분봉, 1시간봉, 시장지표 모두 상승 방향)")
                         else:
                             print(f"\n❌ 롱 주문 조건 미충족:")
-                            if direction_5m != 'long':
-                                print(f"   - 5분봉 방향 불일치: {direction_5m}")
-                            if direction_15m != 'long':
-                                print(f"   - 15분봉 방향 불일치: {direction_15m}")
+                            if direction_30m != 'long':
+                                print(f"   - 30분봉 방향 불일치: {direction_30m}")
+                            if direction_1h != 'long':
+                                print(f"   - 1시간봉 방향 불일치: {direction_1h}")
                             if market_direction != 'long':
                                 print(f"   - 시장 지표 방향 불일치: {market_direction} ({market_signal_value})")
                     
                     elif trade_signal == 'short':
-                        if direction_5m == 'short' and direction_15m == 'short' and market_direction == 'short':
+                        if direction_30m == 'short' and direction_1h == 'short' and market_direction == 'short':
                             final_trade_signal = 'short'
-                            print(f"\n✅ 숏 주문 조건 충족! (5분봉, 15분봉, 시장지표 모두 하락 방향)")
+                            print(f"\n✅ 숏 주문 조건 충족! (30분봉, 1시간봉, 시장지표 모두 하락 방향)")
                         else:
                             print(f"\n❌ 숏 주문 조건 미충족:")
-                            if direction_5m != 'short':
-                                print(f"   - 5분봉 방향 불일치: {direction_5m}")
-                            if direction_15m != 'short':
-                                print(f"   - 15분봉 방향 불일치: {direction_15m}")
+                            if direction_30m != 'short':
+                                print(f"   - 30분봉 방향 불일치: {direction_30m}")
+                            if direction_1h != 'short':
+                                print(f"   - 1시간봉 방향 불일치: {direction_1h}")
                             if market_direction != 'short':
                                 print(f"   - 시장 지표 방향 불일치: {market_direction} ({market_signal_value})")
                 
@@ -1311,42 +1567,61 @@ class RealtimeTrader:
                     min_trade_amount = max(10.0, min_margin_required * 1.1)  # 10% 여유
                     
                     if available >= min_trade_amount:
-                        # 6. ROI 계산 (5분봉 변화율에 따라 동적 조정)
-                        # 5분봉 변화율이 0.30% (0.003) 이상이면 ROI 10%, 아니면 기본값 5%
-                        if abs(change_5m) >= 0.003:
-                            dynamic_roi = 0.10  # 10%
-                            print(f"\n📊 5분봉 변화율 {abs(change_5m)*100:.2f}% >= 0.30% → ROI 10%로 설정")
+                        # 6. TP/SL 계산
+                        # TP 40%, SL 5% (고정)
+                        dynamic_roi = 0.4  # 40%
+                        dynamic_sl = 0.05  # 5%
+                        print(f"\n📊 TP/SL 설정: TP {dynamic_roi*100:.0f}%, SL {dynamic_sl*100:.0f}%")
+                        
+                        # 7. 포지션 열기 (95% 자금 사용, 레버리지, 수수료 고려)
+                        if self.dry_run:
+                            # 시뮬레이션 모드: 실제 거래 안 함
+                            # 현재 가격 가져오기 (SL 계산용)
+                            try:
+                                ticker = self.exchange.fetch_ticker(self.symbol)
+                                current_price = ticker['last']
+                            except:
+                                current_price = result.get('current_price', 0)
+                            
+                            # SL 가격 계산
+                            if trade_signal == 'long':
+                                stop_loss_price = current_price * (1 - dynamic_sl / self.leverage)
+                            else:  # short
+                                stop_loss_price = current_price * (1 + dynamic_sl / self.leverage)
+                            
+                            print(f"\n💰 [시뮬레이션] 포지션 열기 시뮬레이션:")
+                            print(f"   거래 신호: {trade_signal.upper()}")
+                            print(f"   사용 금액: ${available:,.2f} USDT (95% 사용, {self.leverage}배 레버리지)")
+                            print(f"   목표 ROI: {dynamic_roi*100:.1f}%")
+                            print(f"   손절 ROI: {dynamic_sl*100:.1f}%")
+                            print(f"   SL 가격: ${stop_loss_price:,.2f}")
+                            print(f"   ⚠️ 실제 거래는 수행하지 않습니다 (시뮬레이션 모드)")
                         else:
-                            dynamic_roi = self.take_profit_roi  # 기본값 5%
-                            print(f"\n📊 5분봉 변화율 {abs(change_5m)*100:.2f}% < 0.30% → ROI {dynamic_roi*100:.1f}% 사용")
-                        
-                        # 7. 포지션 열기 (95% 자금 사용, 30배 레버리지, 수수료 고려)
-                        print(f"\n💰 포지션 열기 시도: ${available:,.2f} USDT (95% 사용, {self.leverage}배 레버리지, ROI {dynamic_roi*100:.1f}%)")
-                        
-                        if trade_signal == 'long':
-                            success = self.open_long_position(available, roi=dynamic_roi)
-                        else:  # short
-                            success = self.open_short_position(available, roi=dynamic_roi)
-                        
-                        if success:
-                            print(f"✅ {trade_signal.upper()} 포지션 열기 완료!")
-                        else:
-                            print(f"❌ {trade_signal.upper()} 포지션 열기 실패")
+                            print(f"\n💰 포지션 열기 시도: ${available:,.2f} USDT (95% 사용, {self.leverage}배 레버리지, ROI {dynamic_roi*100:.1f}%)")
+                            
+                            if trade_signal == 'long':
+                                success = self.open_long_position(available, roi=dynamic_roi, sl=dynamic_sl)
+                            else:  # short
+                                success = self.open_short_position(available, roi=dynamic_roi, sl=dynamic_sl)
+                            
+                            if success:
+                                print(f"✅ {trade_signal.upper()} 포지션 열기 완료!")
+                            else:
+                                print(f"❌ {trade_signal.upper()} 포지션 열기 실패")
                     else:
                         print(f"⚠️ 거래 가능 금액이 부족합니다: ${available:,.2f} USDT")
                         print(f"   최소 필요 금액: ${min_trade_amount:,.2f} USDT (최소 주문 수량 0.001 BTC 기준)")
                 else:
                     print("\n❌ 거래 조건 미충족")
-                    print(f"  - 3분봉: {change_3m*100:+.2f}% (조건에서 제외)")
                     
                     # 출력용 체크 (실제 조건 체크와 동일한 로직 사용)
                     epsilon = 1e-8
-                    check_5m = abs(change_5m) >= (self.min_change_5m - epsilon)
-                    check_15m = abs(change_15m) >= (self.min_change_15m - epsilon)
+                    check_30m = abs(change_30m) >= (self.min_change_30m - epsilon)
+                    check_1h = abs(change_1h) >= (self.min_change_1h - epsilon)
                     
                     # 실제 값과 비교값을 더 정확하게 표시
-                    print(f"  - 5분봉: {change_5m*100:+.2f}% (절댓값: {abs(change_5m)*100:.4f}%) {'✓' if check_5m else '✗'} (최소 {self.min_change_5m*100:.2f}% = {self.min_change_5m:.6f})")
-                    print(f"  - 15분봉: {change_15m*100:+.2f}% (절댓값: {abs(change_15m)*100:.4f}%) {'✓' if check_15m else '✗'} (최소 {self.min_change_15m*100:.2f}% = {self.min_change_15m:.6f})")
+                    print(f"  - 30분봉: {change_30m*100:+.2f}% (절댓값: {abs(change_30m)*100:.4f}%) {'✓' if check_30m else '✗'} (최소 {self.min_change_30m*100:.2f}% = {self.min_change_30m:.6f})")
+                    print(f"  - 1시간봉: {change_1h*100:+.2f}% (절댓값: {abs(change_1h)*100:.4f}%) {'✓' if check_1h else '✗'} (최소 {self.min_change_1h*100:.2f}% = {self.min_change_1h:.6f})")
                     
                     # 시장 지표 방향 확인
                     market_signal_value = market_signal.get('signal', 'neutral')
@@ -1359,39 +1634,39 @@ class RealtimeTrader:
                     else:
                         market_direction = 'neutral'
                     
-                    # 5분봉, 15분봉 방향 확인
-                    direction_5m = 'long' if change_5m > 0 else ('short' if change_5m < 0 else 'neutral')
-                    direction_15m = 'long' if change_15m > 0 else ('short' if change_15m < 0 else 'neutral')
+                    # 30분봉, 1시간봉 방향 확인
+                    direction_30m = 'long' if change_30m > 0 else ('short' if change_30m < 0 else 'neutral')
+                    direction_1h = 'long' if change_1h > 0 else ('short' if change_1h < 0 else 'neutral')
                     
-                    # 부호 일치 확인 (5분봉과 15분봉)
-                    both_positive = change_5m > 0 and change_15m > 0
-                    both_negative = change_5m < 0 and change_15m < 0
+                    # 부호 일치 확인 (30분봉과 1시간봉)
+                    both_positive = change_30m > 0 and change_1h > 0
+                    both_negative = change_30m < 0 and change_1h < 0
                     same_sign = both_positive or both_negative
                     
-                    print(f"  - 부호 일치: {'✓' if same_sign else '✗'} (5분봉과 15분봉 같은 부호)")
+                    print(f"  - 부호 일치: {'✓' if same_sign else '✗'} (30분봉과 1시간봉 같은 부호)")
                     
                     # 방향성 종합 분석
                     print(f"\n📊 방향성 분석:")
-                    print(f"   5분봉 예측: {direction_5m} ({change_5m*100:+.2f}%)")
-                    print(f"   15분봉 예측: {direction_15m} ({change_15m*100:+.2f}%)")
+                    print(f"   30분봉 예측: {direction_30m} ({change_30m*100:+.2f}%)")
+                    print(f"   1시간봉 예측: {direction_1h} ({change_1h*100:+.2f}%)")
                     print(f"   시장 지표: {market_direction} ({market_signal_value}, 신뢰도: {market_confidence*100:.1f}%)")
                     
                     # 세 가지 방향 일치 여부 확인
-                    all_long = direction_5m == 'long' and direction_15m == 'long' and market_direction == 'long'
-                    all_short = direction_5m == 'short' and direction_15m == 'short' and market_direction == 'short'
+                    all_long = direction_30m == 'long' and direction_1h == 'long' and market_direction == 'long'
+                    all_short = direction_30m == 'short' and direction_1h == 'short' and market_direction == 'short'
                     
                     if all_long:
                         print(f"  - 방향 일치: ✓ (모두 상승 → 롱 주문 가능)")
                     elif all_short:
                         print(f"  - 방향 일치: ✓ (모두 하락 → 숏 주문 가능)")
                     else:
-                        print(f"  - 방향 일치: ✗ (5분봉, 15분봉, 시장지표 방향 불일치)")
-                        if direction_5m != direction_15m:
-                            print(f"     → 5분봉({direction_5m})과 15분봉({direction_15m}) 불일치")
-                        if direction_5m != market_direction and market_direction != 'neutral':
-                            print(f"     → 5분봉({direction_5m})과 시장지표({market_direction}) 불일치")
-                        if direction_15m != market_direction and market_direction != 'neutral':
-                            print(f"     → 15분봉({direction_15m})과 시장지표({market_direction}) 불일치")
+                        print(f"  - 방향 일치: ✗ (30분봉, 1시간봉, 시장지표 방향 불일치)")
+                        if direction_30m != direction_1h:
+                            print(f"     → 30분봉({direction_30m})과 1시간봉({direction_1h}) 불일치")
+                        if direction_30m != market_direction and market_direction != 'neutral':
+                            print(f"     → 30분봉({direction_30m})과 시장지표({market_direction}) 불일치")
+                        if direction_1h != market_direction and market_direction != 'neutral':
+                            print(f"     → 1시간봉({direction_1h})과 시장지표({market_direction}) 불일치")
             
             print("=" * 60)
             
@@ -1455,19 +1730,25 @@ def main():
                        help='한 번만 실행 (연속 실행 안 함)')
     parser.add_argument('--trade', action='store_true',
                        help='실거래 모드 활성화 (바이낸스 API 필요)')
-    parser.add_argument('--leverage', type=int, default=30,
-                       help='레버리지 배수 (기본값: 30)')
-    parser.add_argument('--take-profit', type=float, default=0.05,
-                       help='Take Profit ROI (기본값: 0.05 = 5%%)')
+    parser.add_argument('--simulate', action='store_true',
+                       help='시뮬레이션 모드 (모든 분석 기능 활성화, 실제 거래 안 함)')
+    parser.add_argument('--leverage', type=int, default=10,
+                       help='레버리지 배수 (기본값: 10)')
+    parser.add_argument('--take-profit', type=float, default=0.4,
+                       help='Take Profit ROI (기본값: 0.10 = 10%%)')
+    parser.add_argument('--stop-loss', type=float, default=0.05,
+                       help='Stop Loss ROI (기본값: 0.03 = 3%%)')
     
     args = parser.parse_args()
     
-    if args.trade:
-        # 실거래 모드
+    if args.trade or args.simulate:
+        # 실거래 모드 또는 시뮬레이션 모드
         trader = RealtimeTrader(
             model_path=args.model,
             leverage=args.leverage,
-            take_profit_roi=args.take_profit
+            take_profit_roi=args.take_profit,
+            stop_loss_roi=args.stop_loss,
+            dry_run=args.simulate  # 시뮬레이션 모드면 dry_run=True
         )
         trader.run_continuous(interval_minutes=args.interval)
     else:
@@ -1486,9 +1767,8 @@ def main():
                 print("=" * 60)
                 print(f"현재 가격: ${result['current_price']:,.2f}")
                 print(f"\n예측 가격:")
-                print(f"  3분 후: ${result.get('predicted_price_3m', result['predicted_price']):,.2f} ({result.get('change_3m', 0)*100:+.2f}%)")
-                print(f"  5분 후: ${result['predicted_price']:,.2f} ({result['price_change_pct']:+.2f}%)")
-                print(f"  15분 후: ${result.get('predicted_price_15m', result['predicted_price']):,.2f} ({result.get('change_15m', 0)*100:+.2f}%)")
+                print(f"  30분 후: ${result.get('predicted_price_30m', result['predicted_price']):,.2f} ({result.get('change_30m', 0)*100:+.2f}%)")
+                print(f"  1시간 후: ${result['predicted_price']:,.2f} ({result['price_change_pct']:+.2f}%)")
                 print(f"\n시그널: {result['signal']}")
                 print(f"강도: {result['strength']:.2f}x")
                 print(f"신뢰도: {result['confidence']:.2f}%")

@@ -75,14 +75,14 @@ class PatchCNNBiLSTM:
     def _direction_aware_loss(self, y_true, y_pred):
         """
         멀티타겟 방향성 인식 손실 함수
-        3분, 5분, 15분 변화율을 동시에 예측
+        30분, 1시간 변화율을 동시에 예측
         각 타겟에 대해 개별적으로 손실 계산 후 가중 평균
         """
-        # y_true와 y_pred는 (batch_size, 3) 형태 (3분, 5분, 15분)
+        # y_true와 y_pred는 (batch_size, 2) 형태 (30분, 1시간)
         # 각 타겟에 대해 개별 손실 계산
         losses = []
         
-        for i in range(3):  # 3분, 5분, 15분
+        for i in range(2):  # 30분, 1시간
             y_true_i = y_true[:, i]
             y_pred_i = y_pred[:, i]
             
@@ -188,12 +188,12 @@ class PatchCNNBiLSTM:
             total_loss_i = alpha * mse_loss_i + (1 - alpha) * direction_loss_i
             losses.append(total_loss_i)
         
-        # 각 타겟에 가중치 부여 (5분이 가장 중요, 3분과 15분은 보조)
-        weights = [0.3, 0.5, 0.2]  # 3분, 5분, 15분
+        # 각 타겟에 가중치 부여 (1시간이 가장 중요, 30분은 보조)
+        weights = [0.4, 0.6]  # 30분, 1시간
         total_loss = sum(w * loss for w, loss in zip(weights, losses))
         
         # NaN 방지
-        total_loss = tf.where(tf.math.is_nan(total_loss), losses[1], total_loss)  # 5분 손실을 기본값으로
+        total_loss = tf.where(tf.math.is_nan(total_loss), losses[1], total_loss)  # 1시간 손실을 기본값으로
         
         return total_loss
     
@@ -455,7 +455,7 @@ class PatchCNNBiLSTM:
         shared_dense = layers.BatchNormalization(name='bn_shared')(shared_dense)
         shared_dense = layers.Dropout(0.25, name='dropout_shared')(shared_dense)
         
-        # 5. 멀티타겟 예측 브랜치 (3분, 5분, 15분 변화율)
+        # 5. 멀티타겟 예측 브랜치 (30분, 1시간 변화율)
         # 각 타겟에 대한 공유 레이어
         target_dense = layers.Dense(
             self.lstm_units // 2,
@@ -466,36 +466,27 @@ class PatchCNNBiLSTM:
         target_dense = layers.BatchNormalization(name='bn_target')(target_dense)
         target_dense = layers.Dropout(0.2, name='dropout_target')(target_dense)
         
-        # 3분 후 변화율 예측
+        # 30분 후 변화율 예측
         # 출력 레이어: 균형잡힌 초기화 (편향 없이 작은 값으로 시작)
-        change_3m = layers.Dense(
+        change_30m = layers.Dense(
             1,
             activation='linear',
             kernel_initializer=keras.initializers.RandomNormal(mean=0.0, stddev=0.05),
             bias_initializer=keras.initializers.Zeros(),  # 편향 없음
-            name='change_3m'
+            name='change_30m'
         )(target_dense)
         
-        # 5분 후 변화율 예측
-        change_5m = layers.Dense(
+        # 1시간 후 변화율 예측
+        change_1h = layers.Dense(
             1,
             activation='linear',
             kernel_initializer=keras.initializers.RandomNormal(mean=0.0, stddev=0.05),
             bias_initializer=keras.initializers.Zeros(),  # 편향 없음
-            name='change_5m'
+            name='change_1h'
         )(target_dense)
         
-        # 15분 후 변화율 예측
-        change_15m = layers.Dense(
-            1,
-            activation='linear',
-            kernel_initializer=keras.initializers.RandomNormal(mean=0.0, stddev=0.05),
-            bias_initializer=keras.initializers.Zeros(),  # 편향 없음
-            name='change_15m'
-        )(target_dense)
-        
-        # 멀티타겟 출력 (3분, 5분, 15분 변화율)
-        outputs = layers.Concatenate(name='multi_target_output')([change_3m, change_5m, change_15m])
+        # 멀티타겟 출력 (30분, 1시간 변화율)
+        outputs = layers.Concatenate(name='multi_target_output')([change_30m, change_1h])
         
         # 모델 생성
         model = keras.Model(

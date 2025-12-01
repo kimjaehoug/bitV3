@@ -2,11 +2,11 @@
 예측 평가 지표
 ==================================================
 
-MSE: 121859.8000
-RMSE: 349.0842
-MAE: 249.0888
-MAPE: 0.2416
-R2: 0.9902
-Mean Error: 89.0396
-Std Error: 337.5378
-Direction Accuracy: 49.8317
+MSE: 226681.8853
+RMSE: 476.1112
+MAE: 343.6209
+MAPE: 0.3408
+R2: 0.9820
+Mean Error: 162.2440
+Std Error: 447.6145
+Direction Accuracy: 49.3917

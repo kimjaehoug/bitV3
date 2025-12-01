@@ -46,12 +46,12 @@ class DataLeakageChecker:
         else:
             X_last = X
         
-        # 멀티타겟인지 확인 (y가 2D이고 shape[1] == 3이면 멀티타겟)
-        is_multitarget = y.ndim == 2 and y.shape[1] == 3
+        # 멀티타겟인지 확인 (y가 2D이고 shape[1] == 2이면 멀티타겟)
+        is_multitarget = y.ndim == 2 and y.shape[1] == 2
         
-        # 멀티타겟인 경우 5분 타겟(인덱스 1) 사용
+        # 멀티타겟인 경우 1시간 타겟(인덱스 1) 사용
         if is_multitarget:
-            y_target = y[:, 1]  # 5분 타겟
+            y_target = y[:, 1]  # 1시간 타겟
         else:
             y_target = y.flatten() if y.ndim > 1 else y
         
