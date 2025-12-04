@@ -1,0 +1,142 @@
+.prediction-panel {
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 10px;
+  padding: 20px;
+  backdrop-filter: blur(10px);
+}
+
+.prediction-panel h3 {
+  font-size: 18px;
+  font-weight: 600;
+  margin-bottom: 20px;
+  color: #e5e7eb;
+}
+
+.no-data {
+  text-align: center;
+  color: #6b7280;
+  padding: 40px 0;
+}
+
+.current-price {
+  margin-bottom: 20px;
+  padding-bottom: 20px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.current-price .label {
+  font-size: 12px;
+  color: #9ca3af;
+  margin-bottom: 8px;
+}
+
+.current-price .value {
+  font-size: 32px;
+  font-weight: 700;
+  color: #ffffff;
+}
+
+.prediction-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 15px;
+  margin-bottom: 20px;
+}
+
+.prediction-item {
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 8px;
+  padding: 15px;
+}
+
+.prediction-item .label {
+  font-size: 11px;
+  color: #9ca3af;
+  margin-bottom: 8px;
+  text-transform: uppercase;
+}
+
+.prediction-item .value {
+  font-size: 20px;
+  font-weight: 600;
+  color: #ffffff;
+  margin-bottom: 8px;
+}
+
+.prediction-item .change {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.prediction-item .change.positive {
+  color: #10b981;
+}
+
+.prediction-item .change.negative {
+  color: #ef4444;
+}
+
+.signal-section {
+  margin-top: 20px;
+  padding-top: 20px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.signal-section .label {
+  font-size: 12px;
+  color: #9ca3af;
+  margin-bottom: 10px;
+}
+
+.signal-badge {
+  display: inline-block;
+  padding: 8px 16px;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 600;
+  color: white;
+  margin-bottom: 10px;
+}
+
+.confidence {
+  font-size: 12px;
+  color: #9ca3af;
+}
+
+.threshold-section {
+  margin-top: 20px;
+  padding-top: 20px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.threshold-section .label {
+  font-size: 12px;
+  color: #9ca3af;
+  margin-bottom: 10px;
+}
+
+.threshold-info {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.threshold-value {
+  font-size: 14px;
+  font-weight: 600;
+  color: #ffffff;
+}
+
+.threshold-original {
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.ai-adjusted-badge {
+  color: #60a5fa;
+  font-weight: 500;
+  margin-left: 4px;
+  font-size: 12px;
+}
+
+

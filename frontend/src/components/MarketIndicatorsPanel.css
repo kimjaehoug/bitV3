@@ -1,0 +1,131 @@
+.market-indicators-panel {
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 10px;
+  padding: 15px;
+  backdrop-filter: blur(10px);
+  max-height: 400px;
+  overflow-y: auto;
+  font-size: 0.9em;
+}
+
+.market-indicators-panel h3 {
+  font-size: 16px;
+  font-weight: 600;
+  margin-bottom: 12px;
+  color: #e5e7eb;
+}
+
+.no-data {
+  text-align: center;
+  color: #6b7280;
+  padding: 40px 0;
+}
+
+.indicators-list {
+  display: flex;
+  flex-direction: column;
+  gap: 15px;
+}
+
+.indicator-item {
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 8px;
+  padding: 15px;
+  border-left: 3px solid rgba(255, 255, 255, 0.1);
+}
+
+.indicator-item.summary {
+  background: rgba(59, 130, 246, 0.1);
+  border-left-color: #3b82f6;
+}
+
+.indicator-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.indicator-icon {
+  font-size: 18px;
+}
+
+.indicator-name {
+  flex: 1;
+  font-size: 14px;
+  font-weight: 600;
+  color: #e5e7eb;
+}
+
+.indicator-strength {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.indicator-details {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.detail-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 12px;
+}
+
+.detail-label {
+  color: #9ca3af;
+}
+
+.detail-value {
+  color: #ffffff;
+  font-weight: 600;
+}
+
+.reasons-list {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.reasons-label {
+  font-size: 11px;
+  color: #9ca3af;
+  margin-bottom: 8px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.reason-item {
+  font-size: 11px;
+  color: #d1d5db;
+  margin-bottom: 4px;
+  padding-left: 8px;
+}
+
+.market-indicators-panel::-webkit-scrollbar {
+  width: 6px;
+}
+
+.market-indicators-panel::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 3px;
+}
+
+.market-indicators-panel::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 3px;
+}
+
+.market-indicators-panel::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.3);
+}
+
+

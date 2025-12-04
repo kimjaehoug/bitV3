@@ -1383,7 +1383,7 @@ def main():
     parser.add_argument('--capital', type=float, default=300, help='초기 자본금')
     parser.add_argument('--leverage', type=int, default=10, help='레버리지 배수 (기본값: 10배)')
     parser.add_argument('--min-change-30m', type=float, default=0.004, help='30분봉 최소 변화율 (기본값: 0.004 = 0.4%%)')
-    parser.add_argument('--min-change-1h', type=float, default=0.003, help='1시간봉 최소 변화율 (기본값: 0.001 = 0.1%%)')
+    parser.add_argument('--min-change-1h', type=float, default=0.004, help='1시간봉 최소 변화율 (기본값: 0.001 = 0.1%%)')
     parser.add_argument('--strong-signal', type=float, default=0.009, help='강한 신호 기준 (기본값: 0.009 = 0.9%%)')
     parser.add_argument('--cooldown', type=int, default=90, help='손실 후 쿨다운 시간 (분, 기본값: 15)')
     parser.add_argument('--use-market-indicators', dest='use_market_indicators', action='store_true', default=True, help='시장 지표 사용 (기본값: True)')

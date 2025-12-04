@@ -14,6 +14,8 @@ warnings.filterwarnings('ignore')
 
 import ccxt
 from dotenv import load_dotenv
+import requests
+import json
 
 # .env 파일에서 환경변수 로드
 load_dotenv()
@@ -42,6 +44,7 @@ class RealtimeTradingSignal:
         self.model_path = model_path
         self.window_size = window_size
         self.min_confidence = min_confidence
+        self.original_min_confidence = min_confidence  # 원본 임계값 저장
         
         # 컴포넌트 초기화
         self.fetcher = BinanceDataFetcher()
@@ -56,6 +59,13 @@ class RealtimeTradingSignal:
         # 이전 예측값 저장 (방향성 판단용)
         self.last_prediction = None
         self.last_price = None
+        
+        # AI 분석 관련 변수
+        self.ai_analysis = None  # 최신 AI 분석 결과
+        self.ai_analysis_time = None  # 마지막 AI 분석 시간
+        self.ai_api_url = os.getenv('AI_API_URL', 'http://localhost:5333/api/gemini/analyze')
+        self.ai_analysis_interval = 300  # 5분 (초 단위)
+        self.ai_threshold_reduction = 0.5  # AI 신호 시 임계값을 50%로 감소
         
         print("=" * 60)
         print("실시간 거래 시그널 시스템 초기화 중...")
@@ -400,10 +410,99 @@ class RealtimeTradingSignal:
         
         return recent_scaled, current_price
     
+    def _get_ai_analysis(self, price_data: list, prediction_data: dict, 
+                         technical_indicators: dict, support_resistance: dict,
+                         trend_lines: dict, market_indicators: dict) -> Optional[dict]:
+        """
+        Gemini API를 통해 AI 분석 요청
+        
+        Returns:
+            AI 분석 결과 또는 None
+        """
+        try:
+            # datetime 객체를 문자열로 변환하는 헬퍼 함수
+            def convert_datetime(obj):
+                """datetime 객체를 문자열로 변환"""
+                if isinstance(obj, datetime):
+                    return obj.isoformat()
+                elif isinstance(obj, dict):
+                    return {k: convert_datetime(v) for k, v in obj.items()}
+                elif isinstance(obj, list):
+                    return [convert_datetime(item) for item in obj]
+                elif isinstance(obj, (pd.Timestamp, pd.DatetimeIndex)):
+                    return str(obj)
+                else:
+                    return obj
+            
+            # API 요청 데이터 준비 (datetime 객체 변환)
+            request_data = {
+                'priceData': convert_datetime(price_data),
+                'predictionData': convert_datetime(prediction_data),
+                'technicalIndicators': convert_datetime(technical_indicators),
+                'supportResistance': convert_datetime(support_resistance),
+                'trendLines': convert_datetime(trend_lines),
+                'marketIndicators': convert_datetime(market_indicators),
+                'sessionId': 'realtime_trading',
+                'modelName': 'gemini-2.5-flash',
+                'includeSimilarPattern': False
+            }
+            
+            response = requests.post(
+                self.ai_api_url,
+                json=request_data,
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                if result.get('success'):
+                    return result.get('analysis')
+            else:
+                print(f"⚠️ AI 분석 요청 실패: {response.status_code}")
+                
+        except Exception as e:
+            print(f"⚠️ AI 분석 오류: {e}")
+        
+        return None
+    
+    def _update_ai_analysis(self, price_data: list, prediction_data: dict,
+                           technical_indicators: dict, support_resistance: dict,
+                           trend_lines: dict, market_indicators: dict):
+        """AI 분석을 주기적으로 업데이트"""
+        current_time = datetime.now()
+        
+        # 첫 호출이거나 5분이 지났으면 AI 분석 요청
+        if (self.ai_analysis_time is None or 
+            (current_time - self.ai_analysis_time).total_seconds() >= self.ai_analysis_interval):
+            
+            print(f"\n🤖 AI 분석 요청 중... ({current_time.strftime('%Y-%m-%d %H:%M:%S')})")
+            ai_result = self._get_ai_analysis(
+                price_data, prediction_data, technical_indicators,
+                support_resistance, trend_lines, market_indicators
+            )
+            
+            if ai_result:
+                self.ai_analysis = ai_result
+                self.ai_analysis_time = current_time
+                recommendation = ai_result.get('recommendation', 'waiting').lower()
+                print(f"✅ AI 분석 완료: {recommendation}")
+                
+                # AI 신호에 따라 임계값 조정
+                if recommendation in ['long', 'short']:
+                    self.min_confidence = self.original_min_confidence * self.ai_threshold_reduction
+                    print(f"📉 임계값 하향 조정: {self.original_min_confidence:.4f} -> {self.min_confidence:.4f} ({recommendation} 신호)")
+                else:
+                    self.min_confidence = self.original_min_confidence
+                    print(f"📊 임계값 원복: {self.min_confidence:.4f} (관망 신호)")
+            else:
+                print("⚠️ AI 분석 실패, 기존 임계값 유지")
+                self.min_confidence = self.original_min_confidence
+    
     def _generate_signal(self, 
                         current_price: float, 
                         predicted_price: float,
-                        confidence: float) -> dict:
+                        confidence: float,
+                        ai_signal: Optional[str] = None) -> dict:
         """
         매수/매도 시그널 생성
         
@@ -411,6 +510,7 @@ class RealtimeTradingSignal:
             current_price: 현재 가격
             predicted_price: 예측 가격 (5분 후)
             confidence: 신뢰도 (가격 변화율)
+            ai_signal: AI 신호 ('long', 'short', 'waiting' 또는 None)
             
         Returns:
             시그널 딕셔너리
@@ -418,16 +518,42 @@ class RealtimeTradingSignal:
         # 가격 변화율 계산
         price_change_pct = (predicted_price - current_price) / current_price
         
-        # 방향성 판단
-        if price_change_pct > self.min_confidence:
-            signal = "매수"
-            strength = min(abs(price_change_pct) / self.min_confidence, 3.0)  # 최대 3배
-        elif price_change_pct < -self.min_confidence:
-            signal = "매도"
-            strength = min(abs(price_change_pct) / self.min_confidence, 3.0)
+        # AI 신호가 있으면 우선 적용
+        if ai_signal in ['long', 'short']:
+            # AI 신호와 예측 방향이 일치하는지 확인
+            if ai_signal == 'long' and price_change_pct > 0:
+                # AI 롱 신호 + 상승 예측: 임계값 하향 적용
+                effective_threshold = self.min_confidence
+                if price_change_pct > effective_threshold:
+                    signal = "매수"
+                    strength = min(abs(price_change_pct) / effective_threshold, 3.0)
+                else:
+                    signal = "보유"
+                    strength = 0.0
+            elif ai_signal == 'short' and price_change_pct < 0:
+                # AI 숏 신호 + 하락 예측: 임계값 하향 적용
+                effective_threshold = self.min_confidence
+                if price_change_pct < -effective_threshold:
+                    signal = "매도"
+                    strength = min(abs(price_change_pct) / effective_threshold, 3.0)
+                else:
+                    signal = "보유"
+                    strength = 0.0
+            else:
+                # AI 신호와 예측 방향이 불일치: 보유
+                signal = "보유"
+                strength = 0.0
         else:
-            signal = "보유"
-            strength = 0.0
+            # AI 신호가 없으면 기존 로직 사용
+            if price_change_pct > self.min_confidence:
+                signal = "매수"
+                strength = min(abs(price_change_pct) / self.min_confidence, 3.0)
+            elif price_change_pct < -self.min_confidence:
+                signal = "매도"
+                strength = min(abs(price_change_pct) / self.min_confidence, 3.0)
+            else:
+                signal = "보유"
+                strength = 0.0
         
         # 이전 예측과 비교하여 방향성 일관성 확인
         direction_consistency = "일관"
@@ -446,6 +572,7 @@ class RealtimeTradingSignal:
             'strength': strength,
             'confidence': abs(price_change_pct) * 100,
             'direction_consistency': direction_consistency,
+            'ai_signal': ai_signal,
             'timestamp': datetime.now()
         }
     
@@ -550,7 +677,182 @@ class RealtimeTradingSignal:
             if abs(change_30m) > 0.003:  # 30분 추세가 있으면 (0.3% 이상)
                 confidence = (abs(change_1h) + abs(change_30m) * 0.5) / 1.5  # 중기 추세 반영
             
-            signal_info = self._generate_signal(current_price, predicted_price_1h, confidence)
+            # AI 분석 업데이트 (5분마다 자동 호출)
+            ai_signal = None
+            if self.ai_analysis:
+                ai_signal = self.ai_analysis.get('recommendation', 'waiting').lower()
+            
+            # AI 분석 요청 (필요한 데이터 준비)
+            try:
+                from market_indicators import MarketIndicators
+                market_indicators_obj = MarketIndicators()
+                market_indicators_data = market_indicators_obj.get_all_indicators()
+                
+                # 가격 데이터 준비 (최근 30개만)
+                price_data_list = []
+                for idx, row in df_raw.tail(30).iterrows():
+                    price_data_list.append({
+                        'timestamp': idx.isoformat() if hasattr(idx, 'isoformat') else str(idx),
+                        'open': float(row['open']),
+                        'high': float(row['high']),
+                        'low': float(row['low']),
+                        'close': float(row['close']),
+                        'volume': float(row['volume'])
+                    })
+                
+                # 예측 데이터 준비
+                prediction_data_dict = {
+                    'predicted_price_30m': float(predicted_price_30m),
+                    'predicted_price_1h': float(predicted_price_1h),
+                    'change_30m': float(change_30m),
+                    'change_1h': float(change_1h)
+                }
+                
+                # 1시간봉 데이터 가져오기 (추세선 계산용)
+                df_1h = None
+                try:
+                    df_1h = self.fetcher.fetch_recent_data(hours=24, timeframe='1h')
+                except Exception as e:
+                    print(f"1시간봉 데이터 수집 실패: {e}")
+                
+                # 기술적 지표 계산 (간단한 형태)
+                technical_indicators_dict = {}
+                try:
+                    # RSI 계산
+                    delta = df_raw['close'].diff()
+                    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+                    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+                    rs = gain / loss
+                    rsi = 100 - (100 / (1 + rs))
+                    technical_indicators_dict['rsi'] = float(rsi.iloc[-1]) if not pd.isna(rsi.iloc[-1]) else None
+                except Exception:
+                    technical_indicators_dict['rsi'] = None
+                
+                # 지지/저항선 계산
+                support_resistance_dict = {}
+                try:
+                    recent_data = df_raw.tail(144)  # 최근 12시간 (144개 5분봉)
+                    if len(recent_data) >= 20:
+                        lows = recent_data['low'].values
+                        highs = recent_data['high'].values
+                        support_base = float(np.mean(sorted(lows)[:5])) if len(lows) >= 5 else float(np.mean(lows))
+                        resistance_base = float(np.mean(sorted(highs, reverse=True)[:5])) if len(highs) >= 5 else float(np.mean(highs))
+                        support_resistance_dict = {
+                            'support_levels': [support_base] * len(recent_data),
+                            'resistance_levels': [resistance_base] * len(recent_data),
+                            'current_support': support_base,
+                            'current_resistance': resistance_base
+                        }
+                    else:
+                        support_resistance_dict = {
+                            'support_levels': None,
+                            'resistance_levels': None,
+                            'current_support': None,
+                            'current_resistance': None
+                        }
+                except Exception as e:
+                    print(f"지지/저항선 계산 오류: {e}")
+                    support_resistance_dict = {
+                        'support_levels': None,
+                        'resistance_levels': None,
+                        'current_support': None,
+                        'current_resistance': None
+                    }
+                
+                # 추세선 계산 (간단한 버전)
+                trend_lines_dict = {}
+                try:
+                    # 추세선 계산을 위한 데이터 준비
+                    trend_df = df_raw.tail(288)  # 최근 24시간 (288개 5분봉)
+                    if df_1h is not None and len(df_1h) >= 24:
+                        trend_df_1h = df_1h.tail(24)
+                    else:
+                        trend_df_1h = None
+                    
+                    if len(trend_df) >= 20:
+                        # 고점/저점 찾기
+                        recent_data = trend_df.tail(min(288, len(trend_df))).copy()
+                        high_prices = recent_data['high'].values
+                        low_prices = recent_data['low'].values
+                        
+                        recent_highs = []
+                        recent_lows = []
+                        lookback = 2
+                        
+                        for i in range(lookback, len(recent_data) - lookback):
+                            is_high = all(high_prices[i] >= high_prices[i-j] and high_prices[i] >= high_prices[i+j] 
+                                         for j in range(1, lookback + 1))
+                            is_low = all(low_prices[i] <= low_prices[i-j] and low_prices[i] <= low_prices[i+j] 
+                                        for j in range(1, lookback + 1))
+                            
+                            if is_high:
+                                recent_highs.append((i, high_prices[i]))
+                            if is_low:
+                                recent_lows.append((i, low_prices[i]))
+                        
+                        # 상승 추세선 (저점 연결)
+                        uptrend_line = None
+                        if len(recent_lows) >= 2:
+                            # 최근 2개 저점으로 추세선 생성
+                            point1 = recent_lows[-2]
+                            point2 = recent_lows[-1]
+                            if point2[0] > point1[0] and point2[1] > point1[1]:
+                                slope = (point2[1] - point1[1]) / (point2[0] - point1[0])
+                                uptrend_line = {
+                                    'start_price': float(point1[1]),
+                                    'end_price': float(point2[1]),
+                                    'slope': float(slope),
+                                    'touch_count': 2,
+                                    'validity': 'medium'
+                                }
+                        
+                        # 하락 추세선 (고점 연결)
+                        downtrend_line = None
+                        if len(recent_highs) >= 2:
+                            # 최근 2개 고점으로 추세선 생성
+                            point1 = recent_highs[-2]
+                            point2 = recent_highs[-1]
+                            if point2[0] > point1[0] and point2[1] < point1[1]:
+                                slope = (point2[1] - point1[1]) / (point2[0] - point1[0])
+                                downtrend_line = {
+                                    'start_price': float(point1[1]),
+                                    'end_price': float(point2[1]),
+                                    'slope': float(slope),
+                                    'touch_count': 2,
+                                    'validity': 'medium'
+                                }
+                        
+                        trend_lines_dict = {
+                            'uptrend_line': uptrend_line,
+                            'downtrend_line': downtrend_line
+                        }
+                        print(f"📈 추세선 계산 완료: 상승={uptrend_line is not None}, 하락={downtrend_line is not None}")
+                    else:
+                        trend_lines_dict = {}
+                except Exception as e:
+                    print(f"추세선 계산 오류: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    trend_lines_dict = {}
+                
+                # AI 분석 업데이트
+                self._update_ai_analysis(
+                    price_data_list,
+                    prediction_data_dict,
+                    technical_indicators_dict,
+                    support_resistance_dict,
+                    trend_lines_dict,
+                    market_indicators_data
+                )
+                
+                # AI 신호 업데이트
+                if self.ai_analysis:
+                    ai_signal = self.ai_analysis.get('recommendation', 'waiting').lower()
+                    print(f"🤖 AI 신호: {ai_signal}")
+            except Exception as e:
+                print(f"⚠️ AI 분석 업데이트 실패: {e}")
+            
+            signal_info = self._generate_signal(current_price, predicted_price_1h, confidence, ai_signal)
             
             # 멀티타겟 정보 추가
             signal_info['change_30m'] = change_30m
@@ -680,8 +982,8 @@ class RealtimeTrader:
                  api_key: Optional[str] = None,
                  api_secret: Optional[str] = None,
                  leverage: int = 10,
-                 take_profit_roi: float = 0.08,  # 10% ROI
-                 stop_loss_roi: float = 0.02,  # 3% 손절
+                 take_profit_roi: float = 0.4,  # 10% ROI
+                 stop_loss_roi: float = 0.05,  # 3% 손절
                  dry_run: bool = False):  # 시뮬레이션 모드
         """
         Args:
@@ -758,7 +1060,7 @@ class RealtimeTrader:
         
         # 거래 조건
         self.min_change_30m = 0.004  # 0.4%
-        self.min_change_1h = 0.003  # 0.2%
+        self.min_change_1h = 0.004  # 0.2%
         self.strong_signal_threshold = 0.009  # 0.9% (강한 신호 기준)
         
         print("=" * 60)
@@ -1303,12 +1605,18 @@ class RealtimeTrader:
             traceback.print_exc()
             # 오류 발생 시에도 쿨다운은 설정하지 않음
     
-    def check_trade_conditions(self, change_30m: float, change_1h: float) -> Optional[str]:
+    def check_trade_conditions(self, change_30m: float, change_1h: float, ai_signal: Optional[str] = None) -> Optional[str]:
         """거래 조건 확인
         
         조건:
+        - AI 신호가 있으면 우선 적용 (임계값 하향)
         - 롱 신호: 30분봉 >= 0.4%, 1시간봉 >= 0.2%, 둘 다 양수
         - 숏 신호: 30분봉 >= min_change_30m, 1시간봉 >= min_change_1h, 둘 다 음수
+        
+        Args:
+            change_30m: 30분봉 변화율
+            change_1h: 1시간봉 변화율
+            ai_signal: AI 신호 ('long', 'short', 'waiting' 또는 None)
         
         Returns:
             'long': 롱 주문 조건 충족
@@ -1317,19 +1625,45 @@ class RealtimeTrader:
         """
         epsilon = 1e-8
         
-        # 롱 신호 체크 (별도 임계값 사용)
+        # AI 신호가 있으면 임계값 하향 적용 (모두 0.001로 완화)
+        if ai_signal in ['long', 'short']:
+            if ai_signal == 'long':
+                # AI 롱 신호: 모두 0.1%로 완화
+                min_change_30m_long = 0.001  # 0.1%
+                min_change_1h_long = 0.001  # 0.1%
+                both_positive = change_30m > 0 and change_1h > 0
+                if both_positive:
+                    if abs(change_30m) >= min_change_30m_long - epsilon and abs(change_1h) >= min_change_1h_long - epsilon:
+                        print(f"🤖 AI 롱 신호로 임계값 하향 적용: 30분 {min_change_30m_long*100:.2f}%, 1시간 {min_change_1h_long*100:.2f}%")
+                        return 'long'
+            
+            elif ai_signal == 'short':
+                # AI 숏 신호: 모두 0.1%로 완화
+                min_change_30m_short = 0.001  # 0.1%
+                min_change_1h_short = 0.001  # 0.1%
+                both_negative = change_30m < 0 and change_1h < 0
+                if both_negative:
+                    if abs(change_30m) >= min_change_30m_short - epsilon and abs(change_1h) >= min_change_1h_short - epsilon:
+                        print(f"🤖 AI 숏 신호로 임계값 하향 적용: 30분 {min_change_30m_short*100:.2f}%, 1시간 {min_change_1h_short*100:.2f}%")
+                        return 'short'
+        
+        # AI 신호가 없으면 기존 로직 사용
+        # 롱 신호 체크 (양예측: 30분 0.2%, 1시간 0.2%)
         both_positive = change_30m > 0 and change_1h > 0
         if both_positive:
-            # 롱 신호: 30분봉 0.4%, 1시간봉 0.2%
-            min_change_30m_long = 0.004  # 0.4%
+            # 롱 신호: 30분봉 0.2%, 1시간봉 0.2%
+            min_change_30m_long = 0.002  # 0.2%
             min_change_1h_long = 0.002  # 0.2%
             if abs(change_30m) >= min_change_30m_long - epsilon and abs(change_1h) >= min_change_1h_long - epsilon:
                 return 'long'
         
-        # 숏 신호 체크 (기존 임계값 사용)
+        # 숏 신호 체크 (음예측: 30분 0.4%, 1시간 0.4%)
         both_negative = change_30m < 0 and change_1h < 0
         if both_negative:
-            if abs(change_30m) >= self.min_change_30m - epsilon and abs(change_1h) >= self.min_change_1h - epsilon:
+            # 숏 신호: 30분봉 0.4%, 1시간봉 0.4%
+            min_change_30m_short = 0.004  # 0.4%
+            min_change_1h_short = 0.004  # 0.4%
+            if abs(change_30m) >= min_change_30m_short - epsilon and abs(change_1h) >= min_change_1h_short - epsilon:
                 return 'short'
         
         return None
@@ -1363,47 +1697,57 @@ class RealtimeTrader:
             if is_strong_signal:
                 print(f"\n🔥 강한 신호 감지! (30분봉: {abs(change_30m)*100:.2f}%, 1시간봉: {abs(change_1h)*100:.2f}% 모두 0.9% 이상)")
             
-            # 1.5. 시장 지표 분석
+            # 1.5. AI 신호 확인
+            ai_signal = None
+            if hasattr(self.signal_generator, 'ai_analysis') and self.signal_generator.ai_analysis:
+                ai_signal = self.signal_generator.ai_analysis.get('recommendation', 'waiting').lower()
+            
+            # 1.6. 시장 지표 분석 (AI 신호가 없을 때만)
             print("\n" + "-" * 60)
-            print("시장 지표 분석")
-            print("-" * 60)
-            market_signal = {'signal': 'neutral', 'confidence': 0.0}  # 기본값 설정
-            try:
-                market_signal = self.market_indicators.get_trading_signal_from_indicators()
-                indicators = market_signal.get('indicators', {})
-                
-                # 오더북 불균형
-                ob = indicators.get('orderbook_imbalance', {})
-                imbalance_ratio = ob.get('imbalance_ratio', 0)
-                spread_pct = ob.get('spread_pct', 0)
-                print(f"📊 오더북 불균형: {ob.get('imbalance_strength', 'neutral')} (비율: {imbalance_ratio*100:+.2f}%, 스프레드: {spread_pct:.3f}%)")
-                
-                # 청산 클러스터
-                lc = indicators.get('liquidation_clusters', {})
-                print(f"💥 청산 클러스터: {lc.get('liquidation_strength', 'neutral')} (비율: {lc.get('liquidation_ratio', 0)*100:+.2f}%)")
-                
-                # 변동성 압축
-                vs = indicators.get('volatility_squeeze', {})
-                print(f"📉 변동성: {vs.get('squeeze_status', 'normal')} (폭발 가능성: {vs.get('expansion_potential', 'low')})")
-                
-                # OI 급증
-                oi = indicators.get('oi_surge', {})
-                print(f"💰 OI: {oi.get('oi_surge_status', 'normal')} (방향: {oi.get('oi_direction', 'balanced')}, 펀딩: {oi.get('funding_rate_pct', 0):+.4f}%)")
-                
-                # CVD 전환
-                cvd = indicators.get('cvd_turnover', {})
-                print(f"🔄 CVD: {cvd.get('cvd_trend', 'neutral')} (전환: {'예' if cvd.get('cvd_turnover', False) else '아니오'})")
-                
-                # 종합 신호
-                print(f"\n🎯 시장 지표 종합 신호: {market_signal.get('signal', 'neutral')} (신뢰도: {market_signal.get('confidence', 0)*100:.1f}%)")
-                if market_signal.get('reasons'):
-                    print("   근거:")
-                    for reason in market_signal['reasons']:
-                        print(f"     - {reason}")
-                
-            except Exception as e:
-                print(f"⚠️ 시장 지표 분석 실패: {e}")
-                market_signal = {'signal': 'neutral', 'confidence': 0.0}
+            if ai_signal in ['long', 'short']:
+                print("🤖 AI 신호 감지: 시장 지표 및 기술 지표 무시")
+                print(f"   AI 추천: {ai_signal.upper()}")
+                market_signal = {'signal': 'neutral', 'confidence': 0.0}  # AI 신호가 있으면 무시
+            else:
+                print("시장 지표 분석")
+                print("-" * 60)
+                market_signal = {'signal': 'neutral', 'confidence': 0.0}  # 기본값 설정
+                try:
+                    market_signal = self.market_indicators.get_trading_signal_from_indicators()
+                    indicators = market_signal.get('indicators', {})
+                    
+                    # 오더북 불균형
+                    ob = indicators.get('orderbook_imbalance', {})
+                    imbalance_ratio = ob.get('imbalance_ratio', 0)
+                    spread_pct = ob.get('spread_pct', 0)
+                    print(f"📊 오더북 불균형: {ob.get('imbalance_strength', 'neutral')} (비율: {imbalance_ratio*100:+.2f}%, 스프레드: {spread_pct:.3f}%)")
+                    
+                    # 청산 클러스터
+                    lc = indicators.get('liquidation_clusters', {})
+                    print(f"💥 청산 클러스터: {lc.get('liquidation_strength', 'neutral')} (비율: {lc.get('liquidation_ratio', 0)*100:+.2f}%)")
+                    
+                    # 변동성 압축
+                    vs = indicators.get('volatility_squeeze', {})
+                    print(f"📉 변동성: {vs.get('squeeze_status', 'normal')} (폭발 가능성: {vs.get('expansion_potential', 'low')})")
+                    
+                    # OI 급증
+                    oi = indicators.get('oi_surge', {})
+                    print(f"💰 OI: {oi.get('oi_surge_status', 'normal')} (방향: {oi.get('oi_direction', 'balanced')}, 펀딩: {oi.get('funding_rate_pct', 0):+.4f}%)")
+                    
+                    # CVD 전환
+                    cvd = indicators.get('cvd_turnover', {})
+                    print(f"🔄 CVD: {cvd.get('cvd_trend', 'neutral')} (전환: {'예' if cvd.get('cvd_turnover', False) else '아니오'})")
+                    
+                    # 종합 신호
+                    print(f"\n🎯 시장 지표 종합 신호: {market_signal.get('signal', 'neutral')} (신뢰도: {market_signal.get('confidence', 0)*100:.1f}%)")
+                    if market_signal.get('reasons'):
+                        print("   근거:")
+                        for reason in market_signal['reasons']:
+                            print(f"     - {reason}")
+                    
+                except Exception as e:
+                    print(f"⚠️ 시장 지표 분석 실패: {e}")
+                    market_signal = {'signal': 'neutral', 'confidence': 0.0}
             
             # 2. 계좌 정보 조회 및 표시
             balance = self.get_account_balance()
@@ -1493,61 +1837,80 @@ class RealtimeTrader:
                     self.trade_cooldown_until = None
                 
                 # 4. 거래 조건 확인 (롱/숏)
-                trade_signal = self.check_trade_conditions(change_30m, change_1h)
+                # AI 신호 가져오기 (TP/SL 가격 포함)
+                ai_signal = None
+                ai_target_price = None
+                ai_stop_loss_price = None
+                if hasattr(self.signal_generator, 'ai_analysis') and self.signal_generator.ai_analysis:
+                    ai_signal = self.signal_generator.ai_analysis.get('recommendation', 'waiting').lower()
+                    ai_target_price = self.signal_generator.ai_analysis.get('target_price')
+                    ai_stop_loss_price = self.signal_generator.ai_analysis.get('stop_loss_price')
                 
-                # 4.5. 시장 지표 방향 확인
-                market_signal_value = market_signal.get('signal', 'neutral')
-                market_confidence = market_signal.get('confidence', 0.0)
+                # AI 신호가 있으면 (TP/SL 가격이 제공되든 안되든) 하향 조정된 임계값 사용
+                trade_signal = self.check_trade_conditions(change_30m, change_1h, ai_signal)
                 
-                # 시장 지표 방향 판단
-                market_direction = None
-                if market_signal_value in ['strong_buy', 'buy']:
-                    market_direction = 'long'
-                elif market_signal_value in ['strong_sell', 'sell']:
-                    market_direction = 'short'
+                # 4.5. AI 신호가 있으면 시장 지표 무시, 없으면 시장 지표 확인
+                if ai_signal in ['long', 'short']:
+                    # AI 신호가 있으면 시장 지표 무시하고 AI 신호만 사용
+                    print(f"\n🤖 AI 신호 우선 적용: {ai_signal.upper()}")
+                    print(f"   시장 지표 및 기술 지표 무시")
+                    final_trade_signal = trade_signal  # AI 신호가 있으면 예측 모델 신호만 사용
                 else:
-                    market_direction = None  # neutral
-                
-                # 4.6. 종합 조건 확인: 30분봉, 1시간봉, 시장 지표 모두 같은 방향이어야 함
-                final_trade_signal = None
-                
-                if trade_signal:
-                    # 30분봉 방향 확인
-                    direction_30m = 'long' if change_30m > 0 else ('short' if change_30m < 0 else None)
-                    # 1시간봉 방향 확인
-                    direction_1h = 'long' if change_1h > 0 else ('short' if change_1h < 0 else None)
+                    # AI 신호가 없으면 기존 로직: 시장 지표 방향 확인
+                    market_signal_value = market_signal.get('signal', 'neutral')
+                    market_confidence = market_signal.get('confidence', 0.0)
                     
-                    print(f"\n📊 방향성 분석:")
-                    print(f"   30분봉 예측: {direction_30m} ({change_30m*100:+.2f}%)")
-                    print(f"   1시간봉 예측: {direction_1h} ({change_1h*100:+.2f}%)")
-                    print(f"   시장 지표: {market_direction} ({market_signal_value}, 신뢰도: {market_confidence*100:.1f}%)")
+                    # 시장 지표 방향 판단
+                    market_direction = None
+                    if market_signal_value in ['strong_buy', 'buy']:
+                        market_direction = 'long'
+                    elif market_signal_value in ['strong_sell', 'sell']:
+                        market_direction = 'short'
+                    else:
+                        market_direction = None  # neutral
                     
-                    # 세 가지가 모두 같은 방향인지 확인
-                    if trade_signal == 'long':
-                        if direction_30m == 'long' and direction_1h == 'long' and market_direction == 'long':
-                            final_trade_signal = 'long'
-                            print(f"\n✅ 롱 주문 조건 충족! (30분봉, 1시간봉, 시장지표 모두 상승 방향)")
-                        else:
-                            print(f"\n❌ 롱 주문 조건 미충족:")
-                            if direction_30m != 'long':
-                                print(f"   - 30분봉 방향 불일치: {direction_30m}")
-                            if direction_1h != 'long':
-                                print(f"   - 1시간봉 방향 불일치: {direction_1h}")
-                            if market_direction != 'long':
-                                print(f"   - 시장 지표 방향 불일치: {market_direction} ({market_signal_value})")
+                    # 4.6. 종합 조건 확인: 30분봉, 1시간봉, 시장 지표 모두 같은 방향이어야 함
+                    final_trade_signal = None
                     
-                    elif trade_signal == 'short':
-                        if direction_30m == 'short' and direction_1h == 'short' and market_direction == 'short':
-                            final_trade_signal = 'short'
-                            print(f"\n✅ 숏 주문 조건 충족! (30분봉, 1시간봉, 시장지표 모두 하락 방향)")
-                        else:
-                            print(f"\n❌ 숏 주문 조건 미충족:")
-                            if direction_30m != 'short':
-                                print(f"   - 30분봉 방향 불일치: {direction_30m}")
-                            if direction_1h != 'short':
-                                print(f"   - 1시간봉 방향 불일치: {direction_1h}")
-                            if market_direction != 'short':
-                                print(f"   - 시장 지표 방향 불일치: {market_direction} ({market_signal_value})")
+                    if trade_signal:
+                        # 30분봉 방향 확인
+                        direction_30m = 'long' if change_30m > 0 else ('short' if change_30m < 0 else None)
+                        # 1시간봉 방향 확인
+                        direction_1h = 'long' if change_1h > 0 else ('short' if change_1h < 0 else None)
+                        
+                        print(f"\n📊 방향성 분석:")
+                        print(f"   30분봉 예측: {direction_30m} ({change_30m*100:+.2f}%)")
+                        print(f"   1시간봉 예측: {direction_1h} ({change_1h*100:+.2f}%)")
+                        print(f"   시장 지표: {market_direction} ({market_signal_value}, 신뢰도: {market_confidence*100:.1f}%)")
+                        
+                        # 세 가지가 모두 같은 방향인지 확인
+                        if trade_signal == 'long':
+                            if direction_30m == 'long' and direction_1h == 'long' and market_direction == 'long':
+                                final_trade_signal = 'long'
+                                print(f"\n✅ 롱 주문 조건 충족! (30분봉, 1시간봉, 시장지표 모두 상승 방향)")
+                            else:
+                                print(f"\n❌ 롱 주문 조건 미충족:")
+                                if direction_30m != 'long':
+                                    print(f"   - 30분봉 방향 불일치: {direction_30m}")
+                                if direction_1h != 'long':
+                                    print(f"   - 1시간봉 방향 불일치: {direction_1h}")
+                                if market_direction != 'long':
+                                    print(f"   - 시장 지표 방향 불일치: {market_direction} ({market_signal_value})")
+                        
+                        elif trade_signal == 'short':
+                            if direction_30m == 'short' and direction_1h == 'short' and market_direction == 'short':
+                                final_trade_signal = 'short'
+                                print(f"\n✅ 숏 주문 조건 충족! (30분봉, 1시간봉, 시장지표 모두 하락 방향)")
+                            else:
+                                print(f"\n❌ 숏 주문 조건 미충족:")
+                                if direction_30m != 'short':
+                                    print(f"   - 30분봉 방향 불일치: {direction_30m}")
+                                if direction_1h != 'short':
+                                    print(f"   - 1시간봉 방향 불일치: {direction_1h}")
+                                if market_direction != 'short':
+                                    print(f"   - 시장 지표 방향 불일치: {market_direction} ({market_signal_value})")
+                    
+                    final_trade_signal = final_trade_signal if final_trade_signal else None
                 
                 # 최종 거래 신호로 업데이트
                 trade_signal = final_trade_signal
@@ -1568,32 +1931,64 @@ class RealtimeTrader:
                     
                     if available >= min_trade_amount:
                         # 6. TP/SL 계산
-                        # TP 40%, SL 5% (고정)
-                        dynamic_roi = 0.4  # 40%
-                        dynamic_sl = 0.05  # 5%
-                        print(f"\n📊 TP/SL 설정: TP {dynamic_roi*100:.0f}%, SL {dynamic_sl*100:.0f}%")
+                        # AI 신호가 있으면 AI가 제공한 TP/SL 사용, 없으면 기본값 사용
+                        # (ai_target_price와 ai_stop_loss_price는 이미 위에서 가져옴)
+                        
+                        # 현재 가격 가져오기 (TP/SL 계산용)
+                        try:
+                            ticker = self.exchange.fetch_ticker(self.symbol)
+                            current_price_trade = ticker['last']
+                        except:
+                            current_price_trade = result.get('current_price', 0)
+                        
+                        if ai_signal in ['long', 'short'] and ai_target_price and ai_stop_loss_price:
+                            # AI 신호가 있고 TP/SL 가격이 제공된 경우
+                            print(f"\n🤖 AI 신호에 따른 TP/SL 설정:")
+                            print(f"   AI 목표가: ${ai_target_price:,.2f}")
+                            print(f"   AI 손절가: ${ai_stop_loss_price:,.2f}")
+                            
+                            # 가격을 ROI로 변환 (레버리지 고려)
+                            if trade_signal == 'long':
+                                # 롱: TP ROI = (target_price - entry_price) / entry_price * leverage
+                                dynamic_roi = (ai_target_price - current_price_trade) / current_price_trade * self.leverage
+                                # 롱: SL ROI = (entry_price - stop_loss_price) / entry_price * leverage
+                                dynamic_sl = (current_price_trade - ai_stop_loss_price) / current_price_trade * self.leverage
+                            else:  # short
+                                # 숏: TP ROI = (entry_price - target_price) / entry_price * leverage
+                                dynamic_roi = (current_price_trade - ai_target_price) / current_price_trade * self.leverage
+                                # 숏: SL ROI = (stop_loss_price - entry_price) / entry_price * leverage
+                                dynamic_sl = (ai_stop_loss_price - current_price_trade) / current_price_trade * self.leverage
+                            
+                            # ROI가 음수이거나 비정상적인 경우 기본값 사용
+                            if dynamic_roi <= 0 or dynamic_sl <= 0 or dynamic_roi > 10 or dynamic_sl > 1:
+                                print(f"   ⚠️ AI TP/SL 값이 비정상적이어서 기본값 사용")
+                                dynamic_roi = 0.4  # 40%
+                                dynamic_sl = 0.05  # 5%
+                            else:
+                                print(f"   계산된 ROI: TP {dynamic_roi*100:.1f}%, SL {dynamic_sl*100:.1f}%")
+                        else:
+                            # AI 신호가 없거나 TP/SL이 제공되지 않은 경우 기본값 사용
+                            dynamic_roi = 0.4  # 40%
+                            dynamic_sl = 0.05  # 5%
+                            print(f"\n📊 TP/SL 설정 (기본값): TP {dynamic_roi*100:.0f}%, SL {dynamic_sl*100:.0f}%")
                         
                         # 7. 포지션 열기 (95% 자금 사용, 레버리지, 수수료 고려)
                         if self.dry_run:
                             # 시뮬레이션 모드: 실제 거래 안 함
-                            # 현재 가격 가져오기 (SL 계산용)
-                            try:
-                                ticker = self.exchange.fetch_ticker(self.symbol)
-                                current_price = ticker['last']
-                            except:
-                                current_price = result.get('current_price', 0)
-                            
                             # SL 가격 계산
                             if trade_signal == 'long':
-                                stop_loss_price = current_price * (1 - dynamic_sl / self.leverage)
+                                stop_loss_price = current_price_trade * (1 - dynamic_sl / self.leverage)
+                                take_profit_price = current_price_trade * (1 + dynamic_roi / self.leverage)
                             else:  # short
-                                stop_loss_price = current_price * (1 + dynamic_sl / self.leverage)
+                                stop_loss_price = current_price_trade * (1 + dynamic_sl / self.leverage)
+                                take_profit_price = current_price_trade * (1 - dynamic_roi / self.leverage)
                             
                             print(f"\n💰 [시뮬레이션] 포지션 열기 시뮬레이션:")
                             print(f"   거래 신호: {trade_signal.upper()}")
                             print(f"   사용 금액: ${available:,.2f} USDT (95% 사용, {self.leverage}배 레버리지)")
                             print(f"   목표 ROI: {dynamic_roi*100:.1f}%")
                             print(f"   손절 ROI: {dynamic_sl*100:.1f}%")
+                            print(f"   TP 가격: ${take_profit_price:,.2f}")
                             print(f"   SL 가격: ${stop_loss_price:,.2f}")
                             print(f"   ⚠️ 실제 거래는 수행하지 않습니다 (시뮬레이션 모드)")
                         else:
@@ -1623,50 +2018,94 @@ class RealtimeTrader:
                     print(f"  - 30분봉: {change_30m*100:+.2f}% (절댓값: {abs(change_30m)*100:.4f}%) {'✓' if check_30m else '✗'} (최소 {self.min_change_30m*100:.2f}% = {self.min_change_30m:.6f})")
                     print(f"  - 1시간봉: {change_1h*100:+.2f}% (절댓값: {abs(change_1h)*100:.4f}%) {'✓' if check_1h else '✗'} (최소 {self.min_change_1h*100:.2f}% = {self.min_change_1h:.6f})")
                     
-                    # 시장 지표 방향 확인
-                    market_signal_value = market_signal.get('signal', 'neutral')
-                    market_confidence = market_signal.get('confidence', 0.0)
-                    market_direction = None
-                    if market_signal_value in ['strong_buy', 'buy']:
-                        market_direction = 'long'
-                    elif market_signal_value in ['strong_sell', 'sell']:
-                        market_direction = 'short'
+                    # AI 신호 확인
+                    ai_signal_debug = None
+                    if hasattr(self.signal_generator, 'ai_analysis') and self.signal_generator.ai_analysis:
+                        ai_signal_debug = self.signal_generator.ai_analysis.get('recommendation', 'waiting').lower()
+                    
+                    if ai_signal_debug in ['long', 'short']:
+                        # AI 신호가 있으면 시장 지표 무시
+                        print(f"\n🤖 AI 신호 감지: {ai_signal_debug.upper()}")
+                        print(f"   시장 지표 및 기술 지표 무시")
+                        
+                        # 30분봉, 1시간봉 방향 확인
+                        direction_30m = 'long' if change_30m > 0 else ('short' if change_30m < 0 else 'neutral')
+                        direction_1h = 'long' if change_1h > 0 else ('short' if change_1h < 0 else 'neutral')
+                        
+                        # 부호 일치 확인 (30분봉과 1시간봉)
+                        both_positive = change_30m > 0 and change_1h > 0
+                        both_negative = change_30m < 0 and change_1h < 0
+                        same_sign = both_positive or both_negative
+                        
+                        print(f"  - 부호 일치: {'✓' if same_sign else '✗'} (30분봉과 1시간봉 같은 부호)")
+                        
+                        # 방향성 종합 분석 (AI 신호만 고려)
+                        print(f"\n📊 방향성 분석 (AI 신호 우선):")
+                        print(f"   30분봉 예측: {direction_30m} ({change_30m*100:+.2f}%)")
+                        print(f"   1시간봉 예측: {direction_1h} ({change_1h*100:+.2f}%)")
+                        print(f"   AI 신호: {ai_signal_debug.upper()}")
+                        
+                        # AI 신호와 예측 방향 일치 여부 확인
+                        ai_long_match = direction_30m == 'long' and direction_1h == 'long' and ai_signal_debug == 'long'
+                        ai_short_match = direction_30m == 'short' and direction_1h == 'short' and ai_signal_debug == 'short'
+                        
+                        if ai_long_match:
+                            print(f"  - 방향 일치: ✓ (30분봉, 1시간봉, AI 신호 모두 롱 → 롱 주문 가능)")
+                        elif ai_short_match:
+                            print(f"  - 방향 일치: ✓ (30분봉, 1시간봉, AI 신호 모두 숏 → 숏 주문 가능)")
+                        else:
+                            print(f"  - 방향 일치: ✗ (30분봉, 1시간봉, AI 신호 방향 불일치)")
+                            if direction_30m != direction_1h:
+                                print(f"     → 30분봉({direction_30m})과 1시간봉({direction_1h}) 불일치")
+                            if direction_30m != ai_signal_debug:
+                                print(f"     → 30분봉({direction_30m})과 AI 신호({ai_signal_debug}) 불일치")
+                            if direction_1h != ai_signal_debug:
+                                print(f"     → 1시간봉({direction_1h})과 AI 신호({ai_signal_debug}) 불일치")
                     else:
-                        market_direction = 'neutral'
-                    
-                    # 30분봉, 1시간봉 방향 확인
-                    direction_30m = 'long' if change_30m > 0 else ('short' if change_30m < 0 else 'neutral')
-                    direction_1h = 'long' if change_1h > 0 else ('short' if change_1h < 0 else 'neutral')
-                    
-                    # 부호 일치 확인 (30분봉과 1시간봉)
-                    both_positive = change_30m > 0 and change_1h > 0
-                    both_negative = change_30m < 0 and change_1h < 0
-                    same_sign = both_positive or both_negative
-                    
-                    print(f"  - 부호 일치: {'✓' if same_sign else '✗'} (30분봉과 1시간봉 같은 부호)")
-                    
-                    # 방향성 종합 분석
-                    print(f"\n📊 방향성 분석:")
-                    print(f"   30분봉 예측: {direction_30m} ({change_30m*100:+.2f}%)")
-                    print(f"   1시간봉 예측: {direction_1h} ({change_1h*100:+.2f}%)")
-                    print(f"   시장 지표: {market_direction} ({market_signal_value}, 신뢰도: {market_confidence*100:.1f}%)")
-                    
-                    # 세 가지 방향 일치 여부 확인
-                    all_long = direction_30m == 'long' and direction_1h == 'long' and market_direction == 'long'
-                    all_short = direction_30m == 'short' and direction_1h == 'short' and market_direction == 'short'
-                    
-                    if all_long:
-                        print(f"  - 방향 일치: ✓ (모두 상승 → 롱 주문 가능)")
-                    elif all_short:
-                        print(f"  - 방향 일치: ✓ (모두 하락 → 숏 주문 가능)")
-                    else:
-                        print(f"  - 방향 일치: ✗ (30분봉, 1시간봉, 시장지표 방향 불일치)")
-                        if direction_30m != direction_1h:
-                            print(f"     → 30분봉({direction_30m})과 1시간봉({direction_1h}) 불일치")
-                        if direction_30m != market_direction and market_direction != 'neutral':
-                            print(f"     → 30분봉({direction_30m})과 시장지표({market_direction}) 불일치")
-                        if direction_1h != market_direction and market_direction != 'neutral':
-                            print(f"     → 1시간봉({direction_1h})과 시장지표({market_direction}) 불일치")
+                        # AI 신호가 없으면 기존 로직: 시장 지표 확인
+                        market_signal_value = market_signal.get('signal', 'neutral')
+                        market_confidence = market_signal.get('confidence', 0.0)
+                        market_direction = None
+                        if market_signal_value in ['strong_buy', 'buy']:
+                            market_direction = 'long'
+                        elif market_signal_value in ['strong_sell', 'sell']:
+                            market_direction = 'short'
+                        else:
+                            market_direction = 'neutral'
+                        
+                        # 30분봉, 1시간봉 방향 확인
+                        direction_30m = 'long' if change_30m > 0 else ('short' if change_30m < 0 else 'neutral')
+                        direction_1h = 'long' if change_1h > 0 else ('short' if change_1h < 0 else 'neutral')
+                        
+                        # 부호 일치 확인 (30분봉과 1시간봉)
+                        both_positive = change_30m > 0 and change_1h > 0
+                        both_negative = change_30m < 0 and change_1h < 0
+                        same_sign = both_positive or both_negative
+                        
+                        print(f"  - 부호 일치: {'✓' if same_sign else '✗'} (30분봉과 1시간봉 같은 부호)")
+                        
+                        # 방향성 종합 분석
+                        print(f"\n📊 방향성 분석:")
+                        print(f"   30분봉 예측: {direction_30m} ({change_30m*100:+.2f}%)")
+                        print(f"   1시간봉 예측: {direction_1h} ({change_1h*100:+.2f}%)")
+                        print(f"   시장 지표: {market_direction} ({market_signal_value}, 신뢰도: {market_confidence*100:.1f}%)")
+                        
+                        # 세 가지 방향 일치 여부 확인
+                        all_long = direction_30m == 'long' and direction_1h == 'long' and market_direction == 'long'
+                        all_short = direction_30m == 'short' and direction_1h == 'short' and market_direction == 'short'
+                        
+                        if all_long:
+                            print(f"  - 방향 일치: ✓ (모두 상승 → 롱 주문 가능)")
+                        elif all_short:
+                            print(f"  - 방향 일치: ✓ (모두 하락 → 숏 주문 가능)")
+                        else:
+                            print(f"  - 방향 일치: ✗ (30분봉, 1시간봉, 시장지표 방향 불일치)")
+                            if direction_30m != direction_1h:
+                                print(f"     → 30분봉({direction_30m})과 1시간봉({direction_1h}) 불일치")
+                            if direction_30m != market_direction and market_direction != 'neutral':
+                                print(f"     → 30분봉({direction_30m})과 시장지표({market_direction}) 불일치")
+                            if direction_1h != market_direction and market_direction != 'neutral':
+                                print(f"     → 1시간봉({direction_1h})과 시장지표({market_direction}) 불일치")
             
             print("=" * 60)
             
