@@ -45,6 +45,10 @@ socketio = SocketIO(app, cors_allowed_origins="*")
 # 전역 변수
 signal_generator = None
 trader = None
+current_leverage = 30  # 현재 레버리지 (기본값: 30배)
+current_take_profit_roi = 0.4  # 현재 Take Profit ROI (기본값: 40%)
+current_stop_loss_roi = 0.05  # 현재 Stop Loss ROI (기본값: 5%)
+trading_mode = 'normal'  # 투자 모드: 'aggressive', 'conservative', 'normal'
 price_history = []  # 가격 히스토리
 prediction_history = []  # 예측 히스토리
 position_history = []  # 포지션 히스토리
@@ -52,6 +56,7 @@ is_running = False
 update_thread = None
 gemini_conversations = {}  # Gemini 대화 히스토리 (세션별)
 last_broadcasted_ai_analysis = None  # 마지막으로 브로드캐스트한 AI 분석 결과
+last_broadcasted_ai_analysis_time = None  # 마지막으로 브로드캐스트한 AI 분석 시간
 
 # 최대 히스토리 크기
 MAX_HISTORY_SIZE = 1000
@@ -510,6 +515,8 @@ def calculate_technical_indicators(df: pd.DataFrame) -> Dict:
         ma10 = close.rolling(window=10).mean().iloc[-1] if len(df) >= 10 else None
         ma20 = close.rolling(window=20).mean().iloc[-1] if len(df) >= 20 else None
         ma50 = close.rolling(window=50).mean().iloc[-1] if len(df) >= 50 else None
+        ma100 = close.rolling(window=100).mean().iloc[-1] if len(df) >= 100 else None
+        ma200 = close.rolling(window=200).mean().iloc[-1] if len(df) >= 200 else None
         
         # 골든크로스/데드크로스
         golden_cross = False
@@ -538,14 +545,38 @@ def calculate_technical_indicators(df: pd.DataFrame) -> Dict:
         upper_band = ma20_bb + (std20 * 2)
         lower_band = ma20_bb - (std20 * 2)
         
+        # MACD
+        ema12 = close.ewm(span=12, adjust=False).mean()
+        ema26 = close.ewm(span=26, adjust=False).mean()
+        macd_line = ema12 - ema26
+        macd_signal_line = macd_line.ewm(span=9, adjust=False).mean()
+        macd_hist = macd_line - macd_signal_line
+        
+        macd_value = float(macd_line.iloc[-1]) if len(macd_line) > 0 and not pd.isna(macd_line.iloc[-1]) else None
+        macd_signal_value = float(macd_signal_line.iloc[-1]) if len(macd_signal_line) > 0 and not pd.isna(macd_signal_line.iloc[-1]) else None
+        macd_hist_value = float(macd_hist.iloc[-1]) if len(macd_hist) > 0 and not pd.isna(macd_hist.iloc[-1]) else None
+        
+        # CCI (Commodity Channel Index)
+        typical_price = (df['high'] + df['low'] + df['close']) / 3 if 'high' in df.columns and 'low' in df.columns else close
+        sma_tp = typical_price.rolling(window=20).mean()
+        mean_deviation = typical_price.rolling(window=20).apply(lambda x: np.mean(np.abs(x - x.mean())))
+        cci_value = (typical_price - sma_tp) / (0.015 * mean_deviation)
+        current_cci = float(cci_value.iloc[-1]) if len(cci_value) > 0 and not pd.isna(cci_value.iloc[-1]) else None
+        
         return {
             'ma5': float(ma5) if ma5 is not None and not pd.isna(ma5) else None,
             'ma10': float(ma10) if ma10 is not None and not pd.isna(ma10) else None,
             'ma20': float(ma20) if ma20 is not None and not pd.isna(ma20) else None,
             'ma50': float(ma50) if ma50 is not None and not pd.isna(ma50) else None,
+            'ma100': float(ma100) if ma100 is not None and not pd.isna(ma100) else None,
+            'ma200': float(ma200) if ma200 is not None and not pd.isna(ma200) else None,
             'golden_cross': golden_cross,
             'dead_cross': dead_cross,
             'rsi': current_rsi,
+            'macd': macd_value,
+            'macd_signal': macd_signal_value,
+            'macd_histogram': macd_hist_value,
+            'cci': current_cci,
             'bollinger_upper': float(upper_band.iloc[-1]) if len(upper_band) > 0 and not pd.isna(upper_band.iloc[-1]) else None,
             'bollinger_lower': float(lower_band.iloc[-1]) if len(lower_band) > 0 and not pd.isna(lower_band.iloc[-1]) else None,
             'bollinger_middle': float(ma20_bb.iloc[-1]) if len(ma20_bb) > 0 and not pd.isna(ma20_bb.iloc[-1]) else None,
@@ -557,7 +588,7 @@ def calculate_technical_indicators(df: pd.DataFrame) -> Dict:
 
 def update_data_loop():
     """1분마다 데이터 업데이트 및 전송"""
-    global is_running, signal_generator, price_history, prediction_history, position_history, trader, last_broadcasted_ai_analysis
+    global is_running, signal_generator, price_history, prediction_history, position_history, trader, last_broadcasted_ai_analysis, last_broadcasted_ai_analysis_time
     
     fetcher = BinanceDataFetcher()
     
@@ -740,30 +771,43 @@ def update_data_loop():
             
             socketio.emit('price_update', emit_data)
             
-            # AI 분석 결과도 함께 브로드캐스트 (변경된 경우에만)
+            # AI 분석 결과도 함께 브로드캐스트 (3분마다 업데이트되면 항상 브로드캐스트)
             if signal_generator and hasattr(signal_generator, 'ai_analysis') and signal_generator.ai_analysis:
-                # 이전 분석과 비교하여 변경된 경우에만 브로드캐스트
                 current_analysis = signal_generator.ai_analysis
-                current_recommendation = current_analysis.get('recommendation', '')
+                current_analysis_time = signal_generator.ai_analysis_time if hasattr(signal_generator, 'ai_analysis_time') else None
                 
-                # 이전 분석이 없거나 추천이 변경된 경우 브로드캐스트
-                if (last_broadcasted_ai_analysis is None or 
-                    last_broadcasted_ai_analysis.get('recommendation') != current_recommendation):
+                # AI 분석이 업데이트되었는지 확인 (시간 비교)
+                should_broadcast = False
+                if current_analysis_time:
+                    # 이전 브로드캐스트 시간이 없거나, AI 분석 시간이 더 최신이면 브로드캐스트
+                    if (last_broadcasted_ai_analysis_time is None or 
+                        current_analysis_time > last_broadcasted_ai_analysis_time):
+                        should_broadcast = True
+                else:
+                    # 시간 정보가 없으면 추천이 변경된 경우에만 브로드캐스트 (기존 로직)
+                    current_recommendation = current_analysis.get('recommendation', '')
+                    if (last_broadcasted_ai_analysis is None or 
+                        last_broadcasted_ai_analysis.get('recommendation') != current_recommendation):
+                        should_broadcast = True
+                
+                if should_broadcast:
                     # 다음 업데이트까지 남은 시간 계산
                     next_update_time = None
-                    if hasattr(signal_generator, 'ai_analysis_time') and signal_generator.ai_analysis_time:
-                        next_update_time = (signal_generator.ai_analysis_time + 
+                    if current_analysis_time:
+                        next_update_time = (current_analysis_time + 
                                            timedelta(seconds=signal_generator.ai_analysis_interval)).isoformat()
                     
                     ai_analysis_data = {
                         'timestamp': datetime.now().isoformat(),
                         'analysis': current_analysis,
                         'next_update_time': next_update_time,
-                        'update_interval': signal_generator.ai_analysis_interval if hasattr(signal_generator, 'ai_analysis_interval') else 300
+                        'update_interval': signal_generator.ai_analysis_interval if hasattr(signal_generator, 'ai_analysis_interval') else 180
                     }
                     socketio.emit('ai_analysis_update', ai_analysis_data)
                     last_broadcasted_ai_analysis = current_analysis.copy()
-                    print(f"📡 AI 분석 결과 브로드캐스트: {current_recommendation}")
+                    last_broadcasted_ai_analysis_time = current_analysis_time
+                    current_recommendation = current_analysis.get('recommendation', '')
+                    print(f"📡 AI 분석 결과 브로드캐스트: {current_recommendation} (업데이트 시간: {current_analysis_time})")
             
         except Exception as e:
             print(f"데이터 업데이트 오류: {e}")
@@ -963,7 +1007,7 @@ def get_balance():
             print("트레이더 자동 초기화 중 (잔액 조회)...")
             trader = RealtimeTrader(
                 model_path='models/best_model.h5',
-                leverage=10,
+                leverage=30,
                 dry_run=False  # 실제 거래 모드
             )
             print("트레이더 자동 초기화 완료")
@@ -975,13 +1019,353 @@ def get_balance():
     
     try:
         balance = trader.get_account_balance()
+        
+        # 사용중인 금액 계산 (총 자산 - 거래 가능 금액)
+        # 포지션 조회 대신 잔액 차이로 계산
+        total = float(balance.get('total', 0))
+        available = float(balance.get('available', 0))
+        used_margin = max(0.0, total - available)  # 사용중인 금액
+        
+        # 포지션 가치는 선택적으로만 계산 (실패해도 무시)
+        position_value = 0.0
+        try:
+            position = trader.get_current_position()
+            if position:
+                position_value = position['size'] * position['entry_price']
+        except Exception as e:
+            # 포지션 조회 실패해도 무시 (사용중인 금액으로 판단)
+            pass
+        
+        # 거래 가능 여부 계산 (70% 기준)
+        min_available_ratio = 0.7  # 70%
+        min_available_amount = total * min_available_ratio
+        available_ratio = (available / total * 100) if total > 0 else 0
+        can_trade = available >= min_available_amount
+        
+        # AI 신호 확인
+        global signal_generator
+        ai_signal = None
+        ai_recommendation = 'waiting'
+        if signal_generator and hasattr(signal_generator, 'ai_analysis') and signal_generator.ai_analysis:
+            ai_recommendation = signal_generator.ai_analysis.get('recommendation', 'waiting').lower()
+            ai_signal = ai_recommendation if ai_recommendation in ['long', 'short'] else None
+        
+        # 거래 상태 메시지
+        trading_status = {
+            'can_trade': can_trade and ai_signal is not None and trader.trading_enabled,
+            'reason': None,
+            'ai_signal': ai_signal,
+            'ai_recommendation': ai_recommendation,
+            'available_ratio': available_ratio,
+            'min_required_ratio': min_available_ratio * 100
+        }
+        
+        if not trader.trading_enabled:
+            trading_status['reason'] = '거래 사이클이 비활성화되어 있습니다'
+        elif not can_trade:
+            trading_status['reason'] = f'거래 가능 금액이 총 자산의 70% 미만입니다 ({available_ratio:.1f}% < 70%)'
+        elif ai_signal is None:
+            trading_status['reason'] = f'AI 추천: {ai_recommendation} (거래 신호 없음)'
+        else:
+            trading_status['reason'] = f'✅ 거래 가능: AI 추천 {ai_signal.upper()}'
+        
         return jsonify({
             'success': True,
             'balance': {
                 'free': float(balance.get('free', 0)),
-                'total': float(balance.get('total', 0)),
-                'available': float(balance.get('available', 0))
-            }
+                'total': total,
+                'available': available,
+                'used': used_margin,  # 사용중인 금액 (총 자산 - 거래 가능)
+                'position_value': float(position_value),  # 포지션 가치 (선택적)
+                'available_ratio': available_ratio,
+                'min_required_ratio': min_available_ratio * 100,
+                'min_required_amount': min_available_amount
+            },
+            'trading_status': trading_status
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/trading/leverage', methods=['POST'])
+def set_leverage():
+    """레버리지 설정"""
+    global trader
+    
+    data = request.json or {}
+    leverage = data.get('leverage', 30)
+    
+    # 레버리지 유효성 검사
+    if not isinstance(leverage, int) or leverage < 1 or leverage > 125:
+        return jsonify({
+            'success': False,
+            'error': '레버리지는 1~125 사이의 정수여야 합니다.'
+        }), 400
+    
+    # 트레이더가 없으면 자동으로 초기화 시도
+    if trader is None:
+        try:
+            print(f"트레이더 자동 초기화 중 (레버리지 {leverage}배)...")
+            trader = RealtimeTrader(
+                model_path='models/best_model.h5',
+                leverage=leverage,
+                dry_run=False  # 실제 거래 모드
+            )
+            print("트레이더 자동 초기화 완료")
+        except Exception as e:
+            return jsonify({
+                'success': False, 
+                'message': f'트레이더 초기화 실패: {str(e)}'
+            }), 400
+    
+    try:
+        # 레버리지 변경
+        trader.leverage = leverage
+        trader.set_leverage(leverage)
+        
+        # signal_generator에도 레버리지 반영
+        if trader and hasattr(trader, 'signal_generator'):
+            trader.signal_generator.leverage = leverage
+            print(f"✅ trader.signal_generator.leverage 업데이트: {leverage}배")
+        
+        # 전역 signal_generator도 업데이트 (update_data_loop에서 사용)
+        global signal_generator
+        if signal_generator is not None:
+            signal_generator.leverage = leverage
+            print(f"✅ 전역 signal_generator.leverage 업데이트: {leverage}배")
+        
+        # 프롬프트에 레버리지 정보 업데이트를 위해 전역 변수에 저장
+        global current_leverage
+        current_leverage = leverage
+        
+        return jsonify({
+            'success': True,
+            'message': f'레버리지가 {leverage}배로 설정되었습니다.',
+            'leverage': leverage
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/trading/leverage', methods=['GET'])
+def get_leverage():
+    """현재 레버리지 조회"""
+    global trader, current_leverage
+    
+    if trader is None:
+        leverage = current_leverage if 'current_leverage' in globals() else 30
+        return jsonify({
+            'success': True,
+            'leverage': leverage,
+            'message': '트레이더가 초기화되지 않았습니다. 기본값을 반환합니다.'
+        })
+    
+    try:
+        leverage = trader.leverage
+        return jsonify({
+            'success': True,
+            'leverage': leverage
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/trading/roi-sl', methods=['POST'])
+def set_roi_sl():
+    """Take Profit ROI와 Stop Loss ROI 설정"""
+    global trader, current_take_profit_roi, current_stop_loss_roi, signal_generator
+    
+    data = request.json or {}
+    take_profit_roi = data.get('take_profit_roi')
+    stop_loss_roi = data.get('stop_loss_roi')
+    
+    # 유효성 검사 (퍼센트로 입력받음)
+    if take_profit_roi is not None:
+        if not isinstance(take_profit_roi, (int, float)) or take_profit_roi <= 0 or take_profit_roi > 1000:
+            return jsonify({
+                'success': False,
+                'error': 'Take Profit ROI는 0보다 크고 1000 이하의 값(퍼센트)이어야 합니다.'
+            }), 400
+        # 퍼센트를 소수로 변환 (예: 40 -> 0.4)
+        take_profit_roi_decimal = take_profit_roi / 100
+    
+    if stop_loss_roi is not None:
+        if not isinstance(stop_loss_roi, (int, float)) or stop_loss_roi <= 0 or stop_loss_roi > 100:
+            return jsonify({
+                'success': False,
+                'error': 'Stop Loss ROI는 0보다 크고 100 이하의 값(퍼센트)이어야 합니다.'
+            }), 400
+        # 퍼센트를 소수로 변환 (예: 5 -> 0.05)
+        stop_loss_roi_decimal = stop_loss_roi / 100
+    
+    # 트레이더가 있으면 업데이트 (소수로 변환된 값 사용)
+    if trader is not None:
+        if take_profit_roi is not None:
+            trader.take_profit_roi = take_profit_roi_decimal
+            current_take_profit_roi = take_profit_roi_decimal
+            # signal_generator에도 반영
+            if hasattr(trader, 'signal_generator'):
+                trader.signal_generator.take_profit_roi = take_profit_roi_decimal
+                print(f"✅ trader.signal_generator.take_profit_roi 업데이트: {take_profit_roi_decimal*100:.1f}%")
+        if stop_loss_roi is not None:
+            trader.stop_loss_roi = stop_loss_roi_decimal
+            current_stop_loss_roi = stop_loss_roi_decimal
+            # signal_generator에도 반영
+            if hasattr(trader, 'signal_generator'):
+                trader.signal_generator.stop_loss_roi = stop_loss_roi_decimal
+                print(f"✅ trader.signal_generator.stop_loss_roi 업데이트: {stop_loss_roi_decimal*100:.1f}%")
+    
+    # 전역 signal_generator도 업데이트 (update_data_loop에서 사용)
+    global signal_generator
+    if signal_generator is not None:
+        if take_profit_roi is not None:
+            signal_generator.take_profit_roi = take_profit_roi_decimal
+            print(f"✅ 전역 signal_generator.take_profit_roi 업데이트: {take_profit_roi_decimal*100:.1f}%")
+        if stop_loss_roi is not None:
+            signal_generator.stop_loss_roi = stop_loss_roi_decimal
+            print(f"✅ 전역 signal_generator.stop_loss_roi 업데이트: {stop_loss_roi_decimal*100:.1f}%")
+    
+    # 전역 변수 업데이트 (소수로 변환된 값 저장)
+    if take_profit_roi is not None:
+        current_take_profit_roi = take_profit_roi_decimal
+    if stop_loss_roi is not None:
+        current_stop_loss_roi = stop_loss_roi_decimal
+    
+    return jsonify({
+        'success': True,
+        'message': 'ROI/SL 설정 완료',
+        'take_profit_roi': current_take_profit_roi,
+        'stop_loss_roi': current_stop_loss_roi
+    })
+
+
+@app.route('/api/trading/roi-sl', methods=['GET'])
+def get_roi_sl():
+    """현재 ROI/SL 조회"""
+    global trader, current_take_profit_roi, current_stop_loss_roi
+    
+    if trader is not None:
+        take_profit_roi = trader.take_profit_roi
+        stop_loss_roi = trader.stop_loss_roi
+    else:
+        take_profit_roi = current_take_profit_roi if 'current_take_profit_roi' in globals() else 0.4
+        stop_loss_roi = current_stop_loss_roi if 'current_stop_loss_roi' in globals() else 0.05
+    
+    return jsonify({
+        'success': True,
+        'take_profit_roi': take_profit_roi,
+        'stop_loss_roi': stop_loss_roi
+    })
+
+
+@app.route('/api/trading/mode', methods=['POST'])
+def set_trading_mode():
+    """투자 모드 설정 (aggressive, conservative, normal)"""
+    global trading_mode
+    
+    data = request.json or {}
+    mode = data.get('mode', 'normal').lower()
+    
+    # 유효성 검사
+    if mode not in ['aggressive', 'conservative', 'normal']:
+        return jsonify({
+            'success': False,
+            'error': '투자 모드는 aggressive, conservative, normal 중 하나여야 합니다.'
+        }), 400
+    
+    trading_mode = mode
+    
+    return jsonify({
+        'success': True,
+        'message': f'투자 모드가 {mode}로 설정되었습니다.',
+        'mode': trading_mode
+    })
+
+
+@app.route('/api/trading/mode', methods=['GET'])
+def get_trading_mode():
+    """현재 투자 모드 조회"""
+    global trading_mode
+    
+    mode = trading_mode if 'trading_mode' in globals() else 'normal'
+    
+    return jsonify({
+        'success': True,
+        'mode': mode
+    })
+
+
+@app.route('/api/trading/enable', methods=['POST'])
+def enable_trading_cycle():
+    """거래 사이클 활성화"""
+    global trader
+    
+    # 트레이더가 없으면 자동으로 초기화 시도
+    if trader is None:
+        try:
+            print("트레이더 자동 초기화 중 (거래 사이클 활성화)...")
+            trader = RealtimeTrader(
+                model_path='models/best_model.h5',
+                leverage=30,
+                dry_run=False  # 실제 거래 모드
+            )
+            print("트레이더 자동 초기화 완료")
+        except Exception as e:
+            return jsonify({
+                'success': False, 
+                'message': f'트레이더 초기화 실패: {str(e)}'
+            }), 400
+    
+    try:
+        trader.enable_trading()
+        return jsonify({
+            'success': True,
+            'message': '거래 사이클이 활성화되었습니다.',
+            'trading_enabled': True
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/trading/disable', methods=['POST'])
+def disable_trading_cycle():
+    """거래 사이클 비활성화"""
+    global trader
+    
+    if trader is None:
+        return jsonify({
+            'success': False,
+            'message': '트레이더가 초기화되지 않았습니다.'
+        }), 400
+    
+    try:
+        trader.disable_trading()
+        return jsonify({
+            'success': True,
+            'message': '거래 사이클이 비활성화되었습니다.',
+            'trading_enabled': False
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/trading/status', methods=['GET'])
+def get_trading_status():
+    """거래 사이클 상태 조회"""
+    global trader
+    
+    if trader is None:
+        return jsonify({
+            'success': True,
+            'trading_enabled': False,
+            'message': '트레이더가 초기화되지 않았습니다.'
+        })
+    
+    try:
+        trading_enabled = trader.trading_enabled if hasattr(trader, 'trading_enabled') else False
+        return jsonify({
+            'success': True,
+            'trading_enabled': trading_enabled
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -1860,6 +2244,8 @@ def _find_similar_pattern(current_prices: List[Dict], price_history: List[Dict])
 
 def _build_gemini_prompt(data: Dict, include_similar_pattern: bool = False) -> str:
     """Gemini API용 프롬프트 생성"""
+    global current_leverage, current_take_profit_roi, current_stop_loss_roi, trading_mode
+    
     price_data = data.get('priceData', []) or []
     prediction_data = data.get('predictionData', {}) or {}
     technical_indicators = data.get('technicalIndicators', {}) or {}
@@ -1867,6 +2253,40 @@ def _build_gemini_prompt(data: Dict, include_similar_pattern: bool = False) -> s
     trend_lines = data.get('trendLines', {}) or {}
     market_indicators = data.get('marketIndicators', {}) or {}
     fibonacci = data.get('fibonacci', {}) or {}
+    
+    # 현재 설정 가져오기 (data에서 우선, 없으면 전역 변수, 없으면 기본값)
+    leverage = data.get('leverage') or (current_leverage if 'current_leverage' in globals() else 30)
+    take_profit_roi = data.get('take_profit_roi') or (current_take_profit_roi if 'current_take_profit_roi' in globals() else 0.4)
+    stop_loss_roi = data.get('stop_loss_roi') or (current_stop_loss_roi if 'current_stop_loss_roi' in globals() else 0.05)
+    mode = trading_mode if 'trading_mode' in globals() else 'normal'
+    
+    # 디버깅: 설정값 확인
+    print(f"🔧 프롬프트 설정값:")
+    print(f"   - 레버리지: {leverage}배 (data에서: {data.get('leverage')}, 전역: {current_leverage if 'current_leverage' in globals() else 'N/A'})")
+    print(f"   - Take Profit ROI: {take_profit_roi*100:.1f}% (data에서: {data.get('take_profit_roi')}, 전역: {current_take_profit_roi if 'current_take_profit_roi' in globals() else 'N/A'})")
+    print(f"   - Stop Loss ROI: {stop_loss_roi*100:.1f}% (data에서: {data.get('stop_loss_roi')}, 전역: {current_stop_loss_roi if 'current_stop_loss_roi' in globals() else 'N/A'})")
+    print(f"   - 투자 모드: {mode}")
+    
+    # 디버깅: 기술 지표 확인
+    print(f"📊 기술 지표 데이터 확인:")
+    print(f"   - technical_indicators 타입: {type(technical_indicators)}")
+    print(f"   - technical_indicators 키: {list(technical_indicators.keys()) if technical_indicators else 'None'}")
+    if technical_indicators:
+        print(f"   - MA5: {technical_indicators.get('ma5')}")
+        print(f"   - MA20: {technical_indicators.get('ma20')}")
+        print(f"   - RSI: {technical_indicators.get('rsi')}")
+        print(f"   - MACD: {technical_indicators.get('macd')}")
+        print(f"   - 볼린저 상단: {technical_indicators.get('bollinger_upper')}")
+    
+    # 디버깅: 추세선 확인
+    print(f"📈 추세선 데이터 확인:")
+    print(f"   - trend_lines 타입: {type(trend_lines)}")
+    print(f"   - trend_lines 키: {list(trend_lines.keys()) if trend_lines else 'None'}")
+    if trend_lines:
+        print(f"   - uptrend_line: {trend_lines.get('uptrend_line')}")
+        print(f"   - downtrend_line: {trend_lines.get('downtrend_line')}")
+        print(f"   - uptrend: {trend_lines.get('uptrend')}")
+        print(f"   - downtrend: {trend_lines.get('downtrend')}")
     
     # dataset 폴더에서 유사한 차트 패턴 찾기 (옵션)
     similar_pattern = None
@@ -1982,6 +2402,58 @@ def _build_gemini_prompt(data: Dict, include_similar_pattern: bool = False) -> s
     change_1h = safe_float(prediction_data.get('change_1h'), 0)
     confidence = safe_float(prediction_data.get('confidence'), 0)
     
+    # 기술 지표가 비어있거나 값이 0이면 price_data로부터 재계산
+    if not technical_indicators or all(safe_float(technical_indicators.get(k), 0) == 0 for k in ['ma5', 'ma10', 'ma20', 'rsi', 'bollinger_upper']):
+        print("⚠️ 기술 지표가 비어있거나 0입니다. price_data로부터 재계산합니다...")
+        try:
+            if price_data and len(price_data) >= 50:
+                # price_data를 DataFrame으로 변환
+                # price_data는 리스트이고 각 항목이 딕셔너리 형태
+                df_prices = pd.DataFrame(price_data)
+                
+                # 컬럼 이름 확인 및 변환 (price_data의 구조에 따라)
+                if 'close' in df_prices.columns:
+                    # 이미 close 컬럼이 있음
+                    pass
+                elif 'price' in df_prices.columns:
+                    # price를 close로 변환
+                    df_prices['close'] = df_prices['price']
+                else:
+                    print("⚠️ price_data에 'close' 또는 'price' 컬럼이 없습니다.")
+                    df_prices = None
+                
+                if df_prices is not None and 'close' in df_prices.columns:
+                    # high, low 컬럼이 없으면 close로 채움
+                    if 'high' not in df_prices.columns:
+                        df_prices['high'] = df_prices['close']
+                    if 'low' not in df_prices.columns:
+                        df_prices['low'] = df_prices['close']
+                    
+                    # timestamp를 인덱스로 변환 (있는 경우)
+                    if 'timestamp' in df_prices.columns:
+                        try:
+                            df_prices['timestamp'] = pd.to_datetime(df_prices['timestamp'])
+                            df_prices.set_index('timestamp', inplace=True)
+                        except:
+                            pass
+                    
+                    # 기술 지표 재계산
+                    recalculated_indicators = calculate_technical_indicators(df_prices)
+                    if recalculated_indicators:
+                        print(f"✅ 기술 지표 재계산 완료: {list(recalculated_indicators.keys())}")
+                        # technical_indicators가 None이면 초기화
+                        if technical_indicators is None:
+                            technical_indicators = {}
+                        # 기존 기술 지표에 병합 (기존 값이 있으면 유지)
+                        for k, v in recalculated_indicators.items():
+                            if v is not None and (technical_indicators.get(k) is None or safe_float(technical_indicators.get(k), 0) == 0):
+                                technical_indicators[k] = v
+                                print(f"  - {k}: {v}")
+        except Exception as e:
+            print(f"⚠️ 기술 지표 재계산 오류: {e}")
+            import traceback
+            traceback.print_exc()
+    
     # 모든 이동평균선 추출
     ma5 = safe_float(technical_indicators.get('ma5'), 0)
     ma10 = safe_float(technical_indicators.get('ma10'), 0)
@@ -2003,6 +2475,12 @@ def _build_gemini_prompt(data: Dict, include_similar_pattern: bool = False) -> s
     bb_lower = safe_float(technical_indicators.get('bollinger_lower'), 0)
     bb_width = safe_float(technical_indicators.get('bollinger_width'), 0)
     bb_position = safe_float(technical_indicators.get('bollinger_position'), 0)
+    
+    # 볼린저 밴드 폭과 위치 계산 (값이 없으면 계산)
+    if bb_width == 0 and bb_upper > 0 and bb_lower > 0:
+        bb_width = (bb_upper - bb_lower) / bb_middle if bb_middle > 0 else 0
+    if bb_position == 0 and current_price and bb_upper > 0 and bb_lower > 0:
+        bb_position = (current_price - bb_lower) / (bb_upper - bb_lower) if (bb_upper - bb_lower) > 0 else 0.5
     
     # 지지/저항선 추출
     support_level = safe_float(support_resistance.get('current_support'))
@@ -2064,16 +2542,58 @@ Dataset에서 현재 차트와 유사한 패턴을 발견했습니다:
 **중요**: 위 유사 패턴 정보를 참고하여 해당 패턴의 일반적인 특성과 예상 움직임을 분석하고, 이를 바탕으로 현재 추천을 제공해주세요.
 """
     
+    # 프롬프트 생성 전 최종 값 확인
+    print(f"📝 프롬프트 생성 전 최종 확인:")
+    print(f"   - 레버리지: {leverage}배")
+    print(f"   - Take Profit ROI: {take_profit_roi*100:.1f}%")
+    print(f"   - Stop Loss ROI: {stop_loss_roi*100:.1f}%")
+    print(f"   - MA5: ${ma5:,.2f}" if ma5 > 0 else f"   - MA5: {ma5}")
+    print(f"   - MA20: ${ma20:,.2f}" if ma20 > 0 else f"   - MA20: {ma20}")
+    print(f"   - RSI: {rsi:.1f}" if rsi > 0 else f"   - RSI: {rsi}")
+    print(f"   - MACD: {macd:.4f}" if macd != 0 else f"   - MACD: {macd}")
+    print(f"   - 볼린저 상단: ${bb_upper:,.2f}" if bb_upper > 0 else f"   - 볼린저 상단: {bb_upper}")
+    print(f"   - 상승 추세선: {uptrend_text}")
+    print(f"   - 하락 추세선: {downtrend_text}")
+    
     prompt = f"""당신은 20년 경력의 전문 암호화폐 트레이딩 분석가입니다. 매우 신중하고 체계적인 분석을 수행해야 합니다.
+
+## ⚠️ 중요: 거래 설정
+- **레버리지: {leverage}배** - 모든 거래는 {leverage}배 레버리지로 실행됩니다. 이는 높은 수익과 동시에 높은 리스크를 의미합니다.
+- 레버리지 {leverage}배는 가격 변동이 1%일 때 {leverage}%의 손익이 발생할 수 있으므로, 매우 신중한 분석이 필요합니다.
+- **거래 수수료**: 진입/청산 시 각각 약 0.04%의 수수료가 발생하며, 레버리지 {leverage}배를 적용하면 실제 수수료 비용은 약 {0.08 * leverage:.2f}%입니다 (0.08% × {leverage}배).
+- **TP/SL 비율**: 수수료(약 {0.08 * leverage:.2f}%)를 고려하여 TP와 SL의 비율이 대략 2:1이 되도록 설정하세요.
+- 현재 설정된 레버리지({leverage}배)와 레버리지 적용 수수료(약 {0.08 * leverage:.2f}%)를 반드시 고려하여 리스크를 평가하고 효율적인 TP/SL을 계산하세요.
+
+## 🎯 투자 모드: {mode.upper()}
+
+{f'''### 공격적 모드 (Aggressive)
+- **전략**: 높은 수익을 추구하며, 상대적으로 높은 리스크를 감수합니다.
+- **거래 빈도**: 신호가 약간만 있어도 거래를 추천할 수 있습니다.
+- **신호 기준**: 2개 이상의 지표가 같은 방향을 가리키면 거래 추천 가능합니다.
+- **리스크 허용도**: 중간 정도의 불확실성도 허용합니다.
+- **목표**: 빠른 수익 실현을 우선시합니다.''' if mode == 'aggressive' else f'''### 보수적 모드 (Conservative)
+- **전략**: 안정적인 수익을 추구하며, 리스크를 최소화합니다.
+- **거래 빈도**: 매우 명확한 신호가 있을 때만 거래를 추천합니다.
+- **신호 기준**: 최소 4개 이상의 지표가 같은 방향을 가리켜야 거래 추천 가능합니다.
+- **리스크 허용도**: 불확실성이 조금이라도 있으면 "waiting"을 선택합니다.
+- **목표**: 손실 방지가 수익 추구보다 우선입니다.''' if mode == 'conservative' else f'''### 노말 모드 (Normal)
+- **전략**: 균형잡힌 접근으로 수익과 리스크를 적절히 조절합니다.
+- **거래 빈도**: 명확한 신호가 있을 때 거래를 추천합니다.
+- **신호 기준**: 최소 3개 이상의 지표가 같은 방향을 가리켜야 거래 추천 가능합니다.
+- **리스크 허용도**: 적절한 수준의 불확실성을 허용하되, 과도한 리스크는 피합니다.
+- **목표**: 안정적인 수익 실현을 추구합니다.'''}
 
 ## ⚠️ 분석 원칙 (반드시 준수)
 
-1. **균형잡힌 접근**: 불확실성이 크면 "waiting"을 선택하되, 명확한 신호가 3개 이상 일치하면 "long" 또는 "short"를 추천하세요.
-2. **단계별 검증**: 아래 제시된 5단계 검증 절차를 반드시 순서대로 수행하세요.
-3. **신호 일치도**: 최소 3개 이상의 지표가 같은 방향을 가리킬 때 거래를 추천하세요.
-4. **리스크 우선**: 손실 가능성이 수익 가능성보다 현저히 크면 "waiting"을 선택하세요.
-5. **데이터 신뢰도**: 데이터가 심각하게 부족하거나 대부분의 지표가 모순되면 "waiting"을 선택하세요.
-6. **유의점 필수 제공**: recommendation 값과 관계없이 항상 롱/숏/관망 세 가지 모두에 대한 유의점을 제공하세요.
+1. **투자 모드에 따른 접근**: 위 투자 모드({mode})에 따라 적절한 수준의 리스크를 허용하세요.
+2. **균형잡힌 접근**: 불확실성이 크면 "waiting"을 선택하되, 명확한 신호가 충분히 일치하면 "long" 또는 "short"를 추천하세요.
+3. **단계별 검증**: 아래 제시된 5단계 검증 절차를 반드시 순서대로 수행하세요.
+4. **신호 일치도**: {f'최소 2개 이상' if mode == 'aggressive' else '최소 4개 이상' if mode == 'conservative' else '최소 3개 이상'}의 지표가 같은 방향을 가리킬 때 거래를 추천하세요. (예측 모델은 방향만 참고, 임계값 무시)
+5. **리스크 우선**: 손실 가능성이 수익 가능성보다 현저히 크면 "waiting"을 선택하세요. 특히 {leverage}배 레버리지를 고려하여 리스크를 {f'적절히' if mode == 'aggressive' else '엄격히' if mode == 'conservative' else '신중히'} 평가하세요.
+6. **데이터 신뢰도**: 데이터가 심각하게 부족하거나 대부분의 지표가 모순되면 "waiting"을 선택하세요.
+7. **유의점 필수 제공**: recommendation 값과 관계없이 항상 롱/숏/관망 세 가지 모두에 대한 유의점을 제공하세요.
+8. **레버리지 고려**: 모든 분석과 추천은 {leverage}배 레버리지 환경에서의 리스크를 반드시 고려하세요.
+9. **TP/SL 비율 고려**: 수수료를 고려하여 TP와 SL의 비율이 대략 2:1이 되도록 효율적인 목표가와 손절가를 제안하세요.
 
 ## 현재 시장 데이터 (모든 정보 포함)
 
@@ -2087,11 +2607,13 @@ Dataset에서 현재 차트와 유사한 패턴을 발견했습니다:
 - 최근 평균 거래량: {safe_format(avg_volume)}
 - 거래량 추세: {volume_trend}
 
-### 🔮 예측 데이터
-- 30분 후 예측 가격: ${safe_format(pred_30m)} ({change_30m:+.2f}%)
-- 1시간 후 예측 가격: ${safe_format(pred_1h)} ({change_1h:+.2f}%)
-- 거래 신호: {prediction_data.get('signal', 'neutral')}
-- 신뢰도: {safe_format(confidence, '.2f')}
+### 🔮 예측 데이터 (참고용 - 임계값 고려하지 않음)
+- **⚠️ 중요**: 아래 예측 데이터는 참고용입니다. 예측값의 크기나 임계값을 기준으로 거래를 결정하지 마세요.
+- 30분 후 예측 가격: ${safe_format(pred_30m)} ({change_30m:+.2f}%) - 참고용
+- 1시간 후 예측 가격: ${safe_format(pred_1h)} ({change_1h:+.2f}%) - 참고용
+- 거래 신호: {prediction_data.get('signal', 'neutral')} - 참고용
+- 신뢰도: {safe_format(confidence, '.2f')} - 참고용
+- **거래 결정은 기술 지표, 시장 지표, 추세선, 지지/저항선 등을 종합적으로 분석하여 내리세요. 예측값의 절댓값이나 임계값은 무시하세요.**
 
 ### 📈 이동평균선 (MA) - 모든 기간 포함
 - MA5: ${safe_format(ma5)} {"(현재가 위)" if current_price and ma5 and current_price > ma5 else "(현재가 아래)" if current_price and ma5 else ""}
@@ -2155,10 +2677,11 @@ Dataset에서 현재 차트와 유사한 패턴을 발견했습니다:
 
 ## 📊 5단계 검증 절차 (반드시 순서대로 수행)
 
-### 1단계: 예측 모델 신호 확인
-- 30분 예측: {change_30m:+.2f}% ({'상승' if change_30m > 0 else '하락' if change_30m < 0 else '중립'})
-- 1시간 예측: {change_1h:+.2f}% ({'상승' if change_1h > 0 else '하락' if change_1h < 0 else '중립'})
-- **판단**: 두 예측이 같은 방향이고 절댓값이 0.5% 이상이어야 신뢰 가능. 그렇지 않으면 "waiting" 선택.
+### 1단계: 예측 모델 신호 확인 (참고용 - 임계값 무시)
+- **⚠️ 중요**: 예측 모델의 예측값은 참고용입니다. 예측값의 크기나 임계값(0.5%, 0.2% 등)을 기준으로 거래를 결정하지 마세요.
+- 30분 예측: {change_30m:+.2f}% ({'상승' if change_30m > 0 else '하락' if change_30m < 0 else '중립'}) - **방향만 참고**
+- 1시간 예측: {change_1h:+.2f}% ({'상승' if change_1h > 0 else '하락' if change_1h < 0 else '중립'}) - **방향만 참고**
+- **판단**: 예측값의 방향(상승/하락)만 참고하세요. 절댓값이나 임계값은 무시하고, 기술 지표, 시장 지표, 추세선 등을 종합적으로 분석하여 판단하세요.
 
 ### 2단계: 기술적 지표 확인
 - **이동평균**: 현재가가 MA5, MA20, MA50 중 몇 개 위에 있는지 확인
@@ -2190,30 +2713,30 @@ Dataset에서 현재 차트와 유사한 패턴을 발견했습니다:
 
 ### 5단계: 종합 판단 및 리스크 평가
 - **신호 일치도 계산**: 위 4단계에서 같은 방향을 가리키는 신호가 몇 개인지 세세요
-  - 4개 이상 일치: 강한 신호 (거래 추천 가능)
-  - 3개 일치: 약한 신호 (신중하게 거래 추천)
+  {f'- 2개 이상 일치: 거래 추천 가능 (공격적 모드)' if mode == 'aggressive' else f'- 4개 이상 일치: 강한 신호 (거래 추천 가능)' if mode == 'conservative' else f'- 3개 이상 일치: 거래 추천 가능 (노말 모드)'}
+  {f'- 1개 일치: 약한 신호 (신중하게 거래 추천 가능)' if mode == 'aggressive' else f'- 3개 일치: 약한 신호 (신중하게 거래 추천)' if mode == 'conservative' else f'- 2개 일치: 약한 신호 (신중하게 거래 추천)'}
   - 2개 이하: 불확실 (반드시 "waiting" 선택)
 - **리스크 평가**:
   - 지지선/저항선과의 거리가 가까우면 돌파 가능성 높음
   - RSI가 극단값(70 이상 또는 30 이하)이면 반전 가능성 높음
-  - 예측 변화율이 0.5% 미만이면 신호가 약함
+  - **예측 변화율의 크기는 무시하세요. 예측값은 방향만 참고하세요.**
   - 추세선이 없거나 유효하지 않으면 추세가 불명확함
 
 ## 🎯 최종 추천 기준
 
-**"long" 추천 조건 (5개 중 3개 이상 만족 시 추천 가능)**:
-1. 예측 모델이 상승 방향 (30분 또는 1시간 중 하나라도 +0.3% 이상)
-2. 기술적 지표 2개 이상이 상승 신호 (MA 위, 골든크로스, RSI < 70 등)
-3. 상승 추세선이 유효하고 현재가가 추세선 위 (또는 추세선 근처)
-4. 시장 지표가 상승 방향 (또는 중립)
-5. 저항선까지 여유가 있음 (최소 0.5% 이상) 또는 저항선이 없음
+**"long" 추천 조건 ({f'4개 중 2개 이상' if mode == 'aggressive' else '4개 중 4개 이상' if mode == 'conservative' else '4개 중 3개 이상'} 만족 시 추천 가능)**:
+1. 예측 모델이 상승 방향 (30분 또는 1시간 예측이 양수이면 상승 방향으로 참고, **임계값 무시**)
+2. 기술적 지표 {f'1개 이상' if mode == 'aggressive' else '3개 이상' if mode == 'conservative' else '2개 이상'}이 상승 신호 (MA 위, 골든크로스, RSI < 70 등)
+3. 상승 추세선이 유효하고 현재가가 추세선 위 ({f'또는 추세선 근처' if mode == 'aggressive' else '반드시 추세선 위' if mode == 'conservative' else '또는 추세선 근처'})
+4. 시장 지표가 상승 방향 ({f'또는 중립' if mode == 'aggressive' else '반드시 상승 방향' if mode == 'conservative' else '또는 중립'})
+5. 저항선까지 여유가 있음 ({f'최소 0.3% 이상' if mode == 'aggressive' else '최소 1% 이상' if mode == 'conservative' else '최소 0.5% 이상'}) 또는 저항선이 없음
 
-**"short" 추천 조건 (5개 중 3개 이상 만족 시 추천 가능)**:
-1. 예측 모델이 하락 방향 (30분 또는 1시간 중 하나라도 -0.3% 이하)
-2. 기술적 지표 2개 이상이 하락 신호 (MA 아래, 데드크로스, RSI > 30 등)
-3. 하락 추세선이 유효하고 현재가가 추세선 아래 (또는 추세선 근처)
-4. 시장 지표가 하락 방향 (또는 중립)
-5. 지지선까지 여유가 있음 (최소 0.5% 이상) 또는 지지선이 없음
+**"short" 추천 조건 ({f'4개 중 2개 이상' if mode == 'aggressive' else '4개 중 4개 이상' if mode == 'conservative' else '4개 중 3개 이상'} 만족 시 추천 가능)**:
+1. 예측 모델이 하락 방향 (30분 또는 1시간 예측이 음수이면 하락 방향으로 참고, **임계값 무시**)
+2. 기술적 지표 {f'1개 이상' if mode == 'aggressive' else '3개 이상' if mode == 'conservative' else '2개 이상'}이 하락 신호 (MA 아래, 데드크로스, RSI > 30 등)
+3. 하락 추세선이 유효하고 현재가가 추세선 아래 ({f'또는 추세선 근처' if mode == 'aggressive' else '반드시 추세선 아래' if mode == 'conservative' else '또는 추세선 근처'})
+4. 시장 지표가 하락 방향 ({f'또는 중립' if mode == 'aggressive' else '반드시 하락 방향' if mode == 'conservative' else '또는 중립'})
+5. 지지선까지 여유가 있음 ({f'최소 0.3% 이상' if mode == 'aggressive' else '최소 1% 이상' if mode == 'conservative' else '최소 0.5% 이상'}) 또는 지지선이 없음
 
 **"waiting" 선택 조건 (다음 중 하나라도 해당)**:
 - 롱/숏 조건을 3개 이상 만족하지 않음
@@ -2233,8 +2756,8 @@ Dataset에서 현재 차트와 유사한 패턴을 발견했습니다:
   "summary": "5단계 검증 절차를 거친 종합적인 시장 의견 (각 단계의 판단 결과 포함)",
   "recommendation": "waiting" 또는 "long" 또는 "short",
   "next_timing": "다음 매수/매도 타이밍 설명 (recommendation이 'waiting'일 때만 제공, 구체적인 조건 명시)",
-  "target_price": 목표금액 숫자 (recommendation이 'long' 또는 'short'일 때만 제공, 현재가 대비 2-5% 수준),
-  "stop_loss_price": 손절금액 숫자 (recommendation이 'long' 또는 'short'일 때만 제공, 현재가 대비 1-3% 수준)
+  "target_price": 목표금액 숫자 (recommendation이 'long' 또는 'short'일 때 **반드시 제공 필수**, 모든 기술적 지표를 종합하여 효율적으로 계산),
+  "stop_loss_price": 손절금액 숫자 (recommendation이 'long' 또는 'short'일 때 **반드시 제공 필수**, 모든 기술적 지표를 종합하여 효율적으로 계산)
 }}
 
 **중요 지침**:
@@ -2242,7 +2765,33 @@ Dataset에서 현재 차트와 유사한 패턴을 발견했습니다:
 2. **신호가 명확하지 않으면 "waiting"을 선택하되, 롱/숏 조건을 3개 이상 만족하면 해당 방향을 추천하세요.**
 3. **"summary"에는 각 단계에서 확인한 내용과 최종 판단 근거를 상세히 작성하세요.**
 4. **"recommendation"이 "waiting"인 경우: "next_timing"에 구체적인 조건을 명시하세요 (예: "지지선 $65,000 돌파 및 RSI 50 이상 회복 시", "저항선 $67,000 돌파 및 거래량 증가 시").**
-5. **"recommendation"이 "long" 또는 "short"인 경우: "target_price"와 "stop_loss_price"를 현재 가격(${safe_format(current_price)})을 기준으로 구체적인 숫자로 제공하세요.**
+5. **"recommendation"이 "long" 또는 "short"인 경우: 반드시 "target_price"와 "stop_loss_price"를 현재 가격(${safe_format(current_price)})을 기준으로 구체적인 숫자로 제공해야 합니다. TP/SL이 없으면 거래가 실행되지 않습니다.**
+   
+   **⚠️ 매우 중요: TP/SL 가격 계산 시 다음을 반드시 고려하세요!**
+   
+   **TP/SL 계산 지침:**
+   - **레버리지**: {leverage}배 (가격 변동 1% = {leverage}% 손익)
+   - **거래 수수료**: 진입/청산 시 각각 약 0.04% (총 약 0.08%), 레버리지 {leverage}배 적용 시 실제 수수료 비용은 약 {0.08 * leverage:.2f}% (0.08% × {leverage}배)
+   - **TP/SL 비율**: 수수료(약 {0.08 * leverage:.2f}%)를 고려하여 대략 2:1 비율로 설정하세요
+   - **현재 가격**: ${safe_format(current_price)}
+   - **지지선**: ${safe_format(support_level) if support_level else 'N/A'}
+   - **저항선**: ${safe_format(resistance_level) if resistance_level else 'N/A'}
+   
+   **효율적인 TP/SL 설정 원칙:**
+   - 레버리지 {leverage}배와 레버리지 적용 수수료(약 {0.08 * leverage:.2f}%)를 고려하여 리스크와 수익의 균형을 맞추세요.
+   - TP와 SL의 비율이 대략 2:1이 되도록 설정하세요 (레버리지와 수수료를 고려한 실제 수익률/손실률 기준).
+   - **모든 기술적 지표를 종합적으로 분석하여 최적의 TP/SL을 계산하세요:**
+     * 이동평균선(MA5, MA10, MA20, MA50, MA100, MA200): TP/SL 가격대의 참고점으로 활용
+     * 볼린저 밴드(상단/하단): TP는 상단 근처, SL은 하단 근처를 고려
+     * 피보나치 되돌림 레벨(23.6%, 38.2%, 50%, 61.8%, 78.6%): 중요한 지지/저항 구간으로 활용
+     * 추세선(상승/하락): 추세 방향에 맞는 TP/SL 설정
+     * 지지선/저항선: 중요한 가격대이지만 다른 지표와 함께 종합 고려
+     * RSI, CCI, MACD: 과매수/과매도 구간을 TP/SL 설정에 반영
+     * 시장 지표(오더북 불균형, 청산 클러스터, CVD 등): 시장 심리를 고려한 TP/SL 조정
+   - 단일 지표에 의존하지 말고, 여러 지표가 일치하는 가격대를 우선적으로 고려하세요.
+   - 지표들이 서로 다른 가격대를 가리키면, 가장 신뢰도가 높은 지표들을 우선 고려하되, 레버리지와 수수료를 고려한 효율적인 비율(2:1)을 유지하세요.
+   - 롱 포지션: TP는 현재가보다 높게, SL은 현재가보다 낮게 설정
+   - 숏 포지션: TP는 현재가보다 낮게, SL은 현재가보다 높게 설정
 6. **각 유의점은 위에서 제공한 데이터를 직접 인용하여 구체적으로 작성하세요.**
 7. **한국어로 응답하세요.**
 8. **⚠️ 매우 중요: recommendation 값과 관계없이 반드시 "waiting", "long", "short" 세 가지 모두에 대한 유의점을 제공하세요. 현재 추천이 "waiting"이어도 롱 포지션을 고려할 때의 유의점과 숏 포지션을 고려할 때의 유의점을 반드시 작성하세요. 각 유의점은 최소 3개 이상 제공하세요.**
@@ -2314,10 +2863,20 @@ def _parse_gemini_response(response_text: str) -> Dict:
         if not analysis_result.get('next_timing'):
             analysis_result['next_timing'] = '시장 상황을 지속적으로 모니터링하세요.'
     elif recommendation in ['long', 'short']:
-        # 매수/매도 추천일 때는 목표가와 손절가가 있어야 함
-        if not analysis_result.get('target_price'):
+        # 매수/매도 추천일 때는 목표가와 손절가가 반드시 있어야 함
+        target_price = analysis_result.get('target_price')
+        stop_loss_price = analysis_result.get('stop_loss_price')
+        
+        # TP/SL이 없거나 유효하지 않으면 경고
+        if not target_price or not stop_loss_price:
+            print(f"⚠️ 경고: LLM이 '{recommendation}' 추천을 했지만 TP/SL을 제공하지 않았습니다.")
+            print(f"   target_price: {target_price}, stop_loss_price: {stop_loss_price}")
+            print(f"   → TP/SL이 없으면 거래가 실행되지 않습니다.")
+        
+        # None으로 설정 (거래 로직에서 체크)
+        if not target_price:
             analysis_result['target_price'] = None
-        if not analysis_result.get('stop_loss_price'):
+        if not stop_loss_price:
             analysis_result['stop_loss_price'] = None
     
     return analysis_result

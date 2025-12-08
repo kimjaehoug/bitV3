@@ -189,3 +189,4 @@ const MarketIndicatorsPanel = ({ marketIndicators }) => {
 export default MarketIndicatorsPanel;
 
 
+

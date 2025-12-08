@@ -47,7 +47,7 @@ function App() {
         console.log('시스템 초기화 시작...');
         const response = await axios.post(`${API_BASE_URL}/api/init`, {
           model_path: 'models/best_model.h5',
-          leverage: 10,
+          leverage: 30,
           dry_run: true,
           enable_trading: false
         });

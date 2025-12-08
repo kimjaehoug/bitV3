@@ -111,3 +111,4 @@ const TechnicalIndicators = ({ indicators }) => {
 export default TechnicalIndicators;
 
 
+
